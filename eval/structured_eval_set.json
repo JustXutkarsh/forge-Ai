@@ -1,0 +1,5 @@
+[
+  {"operation": "count", "field": "ticket_id", "expected_count": 200000},
+  {"operation": "group_by", "field": "category", "expected_first": {"value": "Feature Request", "count": 20169}},
+  {"operation": "group_by", "field": "sla_breached", "expected_first": {"value": "Yes", "count": 100043}}
+]

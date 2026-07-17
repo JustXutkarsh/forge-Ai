@@ -1,0 +1,5 @@
+[
+  {"query": "What is the most common complaint category?", "expected_field": "category"},
+  {"query": "Which product appears most often?", "expected_field": "product"},
+  {"query": "Show the ticket trend over time", "expected_field": "ticket_created_date"}
+]

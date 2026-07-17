@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+.venv/
+.env
+data/*.db
+data/chroma/
+outputs/logs/
+outputs/reports/
+outputs/profile.json
+*.egg-info/
