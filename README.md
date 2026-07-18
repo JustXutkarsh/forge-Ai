@@ -1,4 +1,4 @@
-# Forge
+# Forge Ai
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
