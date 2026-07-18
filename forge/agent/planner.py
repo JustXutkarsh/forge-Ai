@@ -7,6 +7,7 @@ from typing import Any
 
 from forge.agent.tools import flag_anomaly, search_data, summarize
 from forge.analytics.queries import query_structured
+from forge.profiling import stage
 
 
 @dataclass(frozen=True)
@@ -25,13 +26,21 @@ class AgentPlan:
     question: str
     steps: tuple[PlanStep, ...]
     rationale: str
+    mode: str = "standard"
+    topics: tuple[str, ...] = ()
 
     @property
     def tool_names(self) -> list[str]:
         return [step.tool for step in self.steps]
 
     def as_dict(self) -> dict[str, Any]:
-        return {"question": self.question, "steps": [asdict(step) for step in self.steps], "rationale": self.rationale}
+        return {
+            "question": self.question,
+            "steps": [asdict(step) for step in self.steps],
+            "rationale": self.rationale,
+            "mode": self.mode,
+            "topics": list(self.topics),
+        }
 
 
 TOOL_NAMES = ("search_data", "query_structured", "summarize", "draft_report", "flag_anomaly")
@@ -70,6 +79,16 @@ _TOP_ISSUE_TERMS = (
     "signin", "credential", "credentials", "payment", "billing", "refund",
     "performance", "slow", "lag", "freeze", "recurring",
 )
+_COMPARISON_MARKERS = ("compare", "versus", " vs ", "difference between", "against")
+_EVIDENCE_EXPLANATION_MARKERS = (
+    "why was this evidence",
+    "why were these tickets",
+    "why were the tickets",
+    "why did you select",
+    "explain the evidence",
+    "why is this evidence",
+)
+_COMPOSITE_CONNECTORS = ("because", "due to", "caused by", "as a result of")
 
 
 def _category_filter(question: str) -> dict[str, str] | None:
@@ -77,6 +96,92 @@ def _category_filter(question: str) -> dict[str, str] | None:
     for phrase, category in sorted(_CATEGORY_SYNONYMS.items(), key=lambda item: -len(item[0])):
         if phrase in lowered:
             return {"category": category}
+    return None
+
+
+def _comparison_topics(question: str) -> tuple[str, ...]:
+    """Extract two independently searchable topics from a comparison question."""
+    lowered = question.lower().strip()
+    if not any(marker in lowered for marker in _COMPARISON_MARKERS):
+        return ()
+    cleaned = re.sub(r"^\s*(?:compare|comparison of|difference between)\s+", "", lowered)
+    cleaned = re.sub(r"\b(?:versus|vs\.?|against)\b", "and", cleaned)
+    parts = [part.strip(" .,?") for part in re.split(r"\s+(?:and|&)\s+|,\s*", cleaned)]
+    parts = [part for part in parts if part and any(term in part for term in _TOP_ISSUE_TERMS)]
+    if len(parts) >= 2:
+        return tuple(parts[:4])
+    return ()
+
+
+def _evidence_context(question: str) -> str | None:
+    """Find a topic that can anchor an evidence-selection explanation."""
+    lowered = question.lower()
+    matches = [phrase for phrase in sorted(_CATEGORY_SYNONYMS, key=len, reverse=True) if phrase in lowered]
+    if matches:
+        return " ".join(dict.fromkeys(matches))
+    matches = [term for term in _TOP_ISSUE_TERMS if term in lowered]
+    return " ".join(dict.fromkeys(matches)) or None
+
+
+def _is_evidence_explanation(question: str) -> bool:
+    """Recognize follow-up requests that explain already retrieved evidence."""
+    lowered = question.lower()
+    return any(marker in lowered for marker in _EVIDENCE_EXPLANATION_MARKERS) or (
+        "explain" in lowered and ("selected" in lowered or "ticket id" in lowered)
+    )
+
+
+def _composite_conditions(question: str) -> tuple[str, ...]:
+    """Return the primary and causal conditions in a multi-condition claim."""
+    lowered = question.lower().strip()
+    if not any(marker in lowered for marker in _COMPOSITE_CONNECTORS):
+        return ()
+    if not any(term in lowered for term in ("how many", "count", "number of", "percentage", "rate")):
+        return ()
+    match = re.search(r"\b(?:because|due to|caused by|as a result of)\b", lowered)
+    if not match:
+        return ()
+    primary = re.sub(r"\b(?:how many|number of|count of|percentage of|rate of)\b", "", lowered[:match.start()]).strip()
+    secondary = lowered[match.end():].strip(" .?")
+    return (primary, secondary) if primary and secondary else ()
+
+
+def _special_plan(question: str) -> AgentPlan | None:
+    """Build deterministic plans for intents requiring complete grounding."""
+    lowered = question.lower().strip()
+    if _is_evidence_explanation(question):
+        context = _evidence_context(question)
+        steps = (PlanStep("search_data", {"query": context, "k": 5}),) if context else ()
+        return AgentPlan(
+            question,
+            steps,
+            "Evidence explanations require an explicit investigation topic and per-ticket retrieval reasons.",
+            "evidence_explanation",
+            (context,) if context else (),
+        )
+    topics = _comparison_topics(question)
+    if topics:
+        steps: list[PlanStep] = []
+        for topic in topics:
+            search_index = len(steps)
+            steps.append(PlanStep("search_data", {"query": topic, "k": 5}))
+            steps.append(PlanStep("summarize", {"source_step": search_index}, (search_index,)))
+        return AgentPlan(
+            question,
+            tuple(steps),
+            "Comparison questions require independent retrieval and summaries for each requested topic.",
+            "comparison",
+            topics,
+        )
+    conditions = _composite_conditions(question)
+    if conditions:
+        return AgentPlan(
+            question,
+            (PlanStep("search_data", {"query": question, "k": 20}),),
+            "Composite claims require every factual condition to be supported before reporting a count.",
+            "composite_claim",
+            conditions,
+        )
     return None
 
 
@@ -105,6 +210,9 @@ def plan_question(question: str) -> AgentPlan:
     """Route a question into a small, testable tool chain without executing tools."""
 
     lowered = question.lower().strip()
+    special = _special_plan(question)
+    if special is not None:
+        return special
     if any(phrase in lowered for phrase in ("weekly report", "weekly summary", "generate report", "draft report")):
         steps = (
             PlanStep("query_structured", {"operation": "group_by", "field": "category"}),
@@ -155,7 +263,8 @@ def run_openai_agent(conn: sqlite3.Connection, question: str) -> dict[str, Any] 
         return None
     if not os.getenv("OPENAI_API_KEY"):
         return None
-    client = OpenAI()
+    with stage("OpenAI initialization"):
+        client = OpenAI(timeout=10, max_retries=0)
     messages = [
         {"role": "system", "content": "Answer only from tool results. Never expose customer names or emails. Cite ticket IDs or query_structured as sources. If the tools do not provide an answer, say not found in available data."},
         {"role": "user", "content": question},
@@ -168,7 +277,8 @@ def run_openai_agent(conn: sqlite3.Connection, question: str) -> dict[str, Any] 
     evidence_confidence = 0.0
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     for _ in range(5):
-        response = client.chat.completions.create(model=os.getenv("FORGE_MODEL", "gpt-4o"), temperature=0.1, messages=messages, tools=TOOL_SCHEMAS, tool_choice="auto")
+        with stage("OpenAI request"):
+            response = client.chat.completions.create(model=os.getenv("FORGE_MODEL", "gpt-4o"), temperature=0.1, messages=messages, tools=TOOL_SCHEMAS, tool_choice="auto")
         usage = getattr(response, "usage", None)
         if usage:
             token_usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)

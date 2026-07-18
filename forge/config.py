@@ -1,5 +1,10 @@
 import os
+import time
 from pathlib import Path
+
+from forge.profiling import add
+
+_config_started = time.perf_counter()
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -29,6 +34,9 @@ DB_PATH = Path(os.getenv("FORGE_DB", "data/forge.db"))
 CHROMA_PATH = Path(os.getenv("FORGE_CHROMA", "data/chroma"))
 OUTPUTS = Path(os.getenv("FORGE_OUTPUTS", "outputs"))
 EMBED_LIMIT = int(os.getenv("FORGE_EMBED_LIMIT", "0") or 0)
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "huggingface").strip().lower()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5").strip()
+add("Config", time.perf_counter() - _config_started)
 
 
 def ensure_dirs() -> None:

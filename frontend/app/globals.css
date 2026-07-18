@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --canvas: 228 22% 7%;
+  --panel: 226 20% 10%;
+  --panel-raised: 226 18% 13%;
+  --ink: 210 20% 96%;
+  --muted: 218 10% 62%;
+  --line: 220 13% 19%;
+  --accent: 26 95% 56%;
+  --accent-strong: 28 100% 64%;
+  --success: 145 63% 49%;
+  --warning: 39 94% 58%;
+  --danger: 0 80% 66%;
+}
+
+html.light {
+  --canvas: 220 24% 96%;
+  --panel: 0 0% 100%;
+  --panel-raised: 220 18% 98%;
+  --ink: 228 22% 12%;
+  --muted: 220 10% 42%;
+  --line: 220 15% 87%;
+}
+
+* { box-sizing: border-box; }
+html { background: hsl(var(--canvas)); }
+body {
+  min-height: 100vh;
+  background: hsl(var(--canvas));
+  color: hsl(var(--ink));
+  font-family: Arial, Helvetica, sans-serif;
+  font-feature-settings: "ss01" 1, "cv11" 1;
+}
+button, input, textarea { font: inherit; }
+::selection { background: rgba(249, 115, 22, .35); color: white; }
+
+@layer utilities {
+  .text-balance { text-wrap: balance; }
+  .grid-fade {
+    background-image: linear-gradient(to right, rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,.035) 1px, transparent 1px);
+    background-size: 32px 32px;
+    mask-image: linear-gradient(to bottom, black, transparent 75%);
+  }
+}

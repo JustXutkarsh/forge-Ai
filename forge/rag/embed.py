@@ -3,18 +3,15 @@ import sys
 import time
 from pathlib import Path
 
-from forge.config import CHROMA_PATH, OpenAIConfigurationError, require_openai_api_key
+from forge.config import CHROMA_PATH
 from forge.pipeline.clean import retrieval_document
+from forge.rag.embedding import get_embedding_service
 from forge.rag.vectorstore import ChromaStore
 
 
 def _openai_client():
-    require_openai_api_key()
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise OpenAIConfigurationError("OpenAI package is not installed. Install the project dependencies and try again.") from exc
-    return OpenAI(timeout=60, max_retries=0)
+    """Compatibility shim for older tests; production embeddings are local."""
+    return get_embedding_service()
 
 
 def _embed_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], client, store: ChromaStore, model: str, batch_size: int) -> int:
@@ -22,16 +19,20 @@ def _embed_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], client, store
     for start in range(0, len(rows), batch_size):
         batch = rows[start:start + batch_size]
         docs = [retrieval_document(dict(row)) for row in batch]
-        response = None
-        for attempt in range(4):
-            try:
-                response = client.embeddings.create(model=model, input=docs)
-                break
-            except Exception:
-                if attempt == 3:
-                    raise
-                time.sleep(5 * (attempt + 1))
-        store.upsert([row["ticket_id"] for row in batch], docs, [item.embedding for item in response.data], [{"category": row["category"], "product": row["product"], "priority": row["priority"]} for row in batch])
+        if hasattr(client, "embed_documents"):
+            embeddings = client.embed_documents(docs, batch_size=min(batch_size, 32))
+        else:
+            response = None
+            for attempt in range(4):
+                try:
+                    response = client.embeddings.create(model=model, input=docs)
+                    break
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    time.sleep(5 * (attempt + 1))
+            embeddings = [item.embedding for item in response.data]
+        store.upsert([row["ticket_id"] for row in batch], docs, embeddings, [{"category": row["category"], "product": row["product"], "priority": row["priority"]} for row in batch])
         conn.executemany("UPDATE tickets SET embedding_status='embedded' WHERE ticket_id=?", [(row["ticket_id"],) for row in batch])
         conn.commit()
         count += len(batch)
@@ -39,9 +40,9 @@ def _embed_rows(conn: sqlite3.Connection, rows: list[sqlite3.Row], client, store
     return count
 
 
-def embed_pending(db_path: str | Path, model: str = "text-embedding-3-large", batch_size: int = 250) -> int:
+def embed_pending(db_path: str | Path, model: str = "local", batch_size: int = 250, chroma_path: str | Path | None = None) -> int:
     client = _openai_client()
-    store = ChromaStore(CHROMA_PATH)
+    store = ChromaStore(chroma_path or CHROMA_PATH)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM tickets WHERE embedding_status = 'pending'").fetchall()
@@ -50,7 +51,7 @@ def embed_pending(db_path: str | Path, model: str = "text-embedding-3-large", ba
     return count
 
 
-def embed_ticket_ids(db_path: str | Path, ticket_ids: list[str], model: str = "text-embedding-3-large", batch_size: int = 250) -> int:
+def embed_ticket_ids(db_path: str | Path, ticket_ids: list[str], model: str = "local", batch_size: int = 250, chroma_path: str | Path | None = None) -> int:
     """Embed only pending tickets selected by the current ingestion run."""
     ids = list(dict.fromkeys(ticket_ids))
     if not ids:
@@ -65,6 +66,6 @@ def embed_ticket_ids(db_path: str | Path, ticket_ids: list[str], model: str = "t
     if not rows:
         conn.close()
         return 0
-    count = _embed_rows(conn, rows, _openai_client(), ChromaStore(CHROMA_PATH), model, batch_size)
+    count = _embed_rows(conn, rows, _openai_client(), ChromaStore(chroma_path or CHROMA_PATH), model, batch_size)
     conn.close()
     return count

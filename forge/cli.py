@@ -1,6 +1,7 @@
 import argparse
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 from forge.agent.executor import ask, weekly_report
@@ -11,6 +12,7 @@ from forge.config import EMBED_LIMIT
 from forge.pipeline.github import ingest_github
 from forge.pipeline.ingest import ingest_csv
 from forge.pipeline.profile import write_profile
+from forge.profiling import PROCESS_START, add, report as profile_report, stage
 
 
 TOOLS = list(TOOL_NAMES)
@@ -88,10 +90,11 @@ def _render_github_ingest(payload: dict) -> str:
 
 
 def _conn(path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
-    return conn
+    with stage("Database connection"):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        return conn
 
 
 def _fallback(argv: list[str] | None = None) -> None:
@@ -121,8 +124,13 @@ def _fallback(argv: list[str] | None = None) -> None:
             print(str(exc)); return
         print(_render_github_ingest(result) if args.source == "github" or args.source.startswith("github:") else json.dumps(result, indent=2)); return
     if args.command == "ask":
+        ask_started = time.perf_counter()
         try:
-            conn = _conn(args.db); payload = ask(conn, args.question); print(json.dumps(payload, indent=2, default=str) if args.json else _render_ask(args.question, payload)); conn.close()
+            conn = _conn(args.db); payload = ask(conn, args.question)
+            with stage("Final rendering"):
+                print(json.dumps(payload, indent=2, default=str) if args.json else _render_ask(args.question, payload))
+            conn.close()
+            add("Total", time.perf_counter() - ask_started); profile_report()
         except OpenAIConfigurationError as exc:
             print(str(exc))
         return
@@ -169,14 +177,18 @@ def _typer_main() -> None:
     @app.command("ask")
     def ask_command(question: str, db: str = typer.Option(str(DB_PATH), "--db", help="SQLite database path."), json_output: bool = typer.Option(False, "--json", help="Return the machine-readable JSON response.")):
         """Ask a grounded support question."""
+        ask_started = time.perf_counter()
         try:
             conn = _conn(db)
             payload = ask(conn, question)
         except OpenAIConfigurationError as exc:
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1)
-        typer.echo(json.dumps(payload, indent=2, default=str) if json_output else _render_ask(question, payload))
+        with stage("Final rendering"):
+            typer.echo(json.dumps(payload, indent=2, default=str) if json_output else _render_ask(question, payload))
         conn.close()
+        add("Total", time.perf_counter() - ask_started)
+        profile_report()
 
     @app.command()
     def status(db: str = typer.Option(str(DB_PATH), "--db", help="SQLite database path."), json_output: bool = typer.Option(False, "--json", help="Return the machine-readable JSON response.")):
@@ -205,6 +217,7 @@ def _typer_main() -> None:
 
 
 def main() -> None:
+    add("CLI startup", time.perf_counter() - PROCESS_START)
     try:
         import typer  # noqa: F401
     except ImportError:

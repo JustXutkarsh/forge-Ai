@@ -5,10 +5,11 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from forge.agent.tools import search_data, summarize
+from forge.agent.tools import composite_claim_answer, explain_evidence, search_data, summarize
 from forge.agent.planner import AgentPlan, plan_question
 from forge.analytics.queries import query_structured
 from forge.config import OUTPUTS, require_openai_api_key
+from forge.profiling import add, note, stage
 
 
 def _log_agent_run(question: str, output: dict[str, Any], started: float) -> None:
@@ -31,25 +32,89 @@ def _log_agent_run(question: str, output: dict[str, Any], started: float) -> Non
         handle.write(json.dumps(payload, default=str) + "\n")
 
 
-def ask(conn: sqlite3.Connection, query: str) -> dict[str, Any]:
+def ask(conn: sqlite3.Connection, query: str, investigation_context: dict[str, Any] | None = None) -> dict[str, Any]:
     started = time.perf_counter()
+    with stage("Planner"):
+        plan = plan_question(query)
+    if plan.mode != "standard":
+        output = _execute_plan(conn, plan, investigation_context)
+        add("Total", time.perf_counter() - started)
+        _log_agent_run(query, output, started)
+        return output
     require_openai_api_key()
     try:
         from forge.agent.planner import run_openai_agent
-        model_output = run_openai_agent(conn, query)
-    except Exception:
+        with stage("OpenAI agent"):
+            model_output = run_openai_agent(conn, query)
+    except Exception as exc:
+        note(f"OpenAI agent failed: {type(exc).__name__}: {exc}")
         model_output = None
     if model_output is not None:
         _log_agent_run(query, model_output, started)
         return model_output
-    plan = plan_question(query)
     output = _execute_plan(conn, plan)
+    add("Total", time.perf_counter() - started)
     _log_agent_run(query, output, started)
     return output
 
 
-def _execute_plan(conn: sqlite3.Connection, plan: AgentPlan) -> dict[str, Any]:
+def _context_tickets(investigation_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Convert explicit API evidence into the engine's ticket-shaped context."""
+    if not investigation_context:
+        return []
+    tickets = []
+    strategy = str(investigation_context.get("retrieval_strategy") or "retrieval")
+    for evidence in investigation_context.get("evidence", []):
+        score = max(0.0, min(1.0, float(evidence.get("score", 0.0) or 0.0)))
+        tickets.append({
+            "ticket_id": str(evidence.get("ticket_id", "")),
+            "issue_description": str(evidence.get("summary", "")),
+            "_context_score": score,
+            "_retrieval_distance": 1.0 - score,
+            "_context_strategy": strategy,
+        })
+    return tickets
+
+
+def _execute_plan(
+    conn: sqlite3.Connection,
+    plan: AgentPlan,
+    investigation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Execute a deterministic plan while preserving intermediate tool results."""
+
+    if plan.mode == "evidence_explanation":
+        context_tickets = _context_tickets(investigation_context)
+        if not context_tickets:
+            answer = "I can explain retrieved tickets, but I don't know which investigation you mean. Please specify the investigation topic."
+            return {
+                "answer": answer,
+                "evidence": [],
+                "source_ticket_ids": [],
+                "sources": [],
+                "confidence": 0.0,
+                "tool_calls": [],
+                "plan": plan.as_dict(),
+                "tickets": [],
+                "structured": None,
+            }
+        query = plan.topics[0] if plan.topics else "previous investigation"
+        answer = explain_evidence(context_tickets, query)
+        strategy = str(investigation_context.get("retrieval_strategy") or "unknown")
+        confidence = max((ticket.get("_context_score", 0.0) for ticket in context_tickets), default=0.0)
+        source_ids = [ticket["ticket_id"] for ticket in context_tickets]
+        return {
+            "answer": answer,
+            "evidence": context_tickets,
+            "source_ticket_ids": source_ids,
+            "sources": ["investigation_context"],
+            "confidence": confidence,
+            "tool_calls": ["investigation_context"],
+            "retrieval_strategy": strategy,
+            "plan": plan.as_dict(),
+            "tickets": context_tickets,
+            "structured": None,
+        }
 
     results: dict[int, dict[str, Any]] = {}
     retrieved: list[dict[str, Any]] = []
@@ -77,7 +142,27 @@ def _execute_plan(conn: sqlite3.Connection, plan: AgentPlan) -> dict[str, Any]:
             raise ValueError(f"unsupported offline plan tool: {step.tool}")
 
     final = results[len(plan.steps) - 1] if plan.steps else {}
-    if plan.steps and plan.steps[-1].tool == "draft_report":
+    if plan.mode == "evidence_explanation":
+        if not plan.topics:
+            answer = "Please specify the investigation topic or question whose evidence you want explained."
+        else:
+            answer = explain_evidence(results.get(0, {}).get("tickets", []), plan.topics[0])
+    elif plan.mode == "comparison":
+        lines = ["Comparison"]
+        for topic_index, topic in enumerate(plan.topics):
+            search_index = topic_index * 2
+            summary_index = search_index + 1
+            topic_result = results.get(search_index, {})
+            tickets = topic_result.get("tickets", [])
+            lines.extend([f"{topic.title()}", f"- Retrieved evidence: {len(tickets)} ticket(s)."])
+            if tickets:
+                lines.extend(f"- {line}" for line in results.get(summary_index, {}).get("summary", "").splitlines())
+            else:
+                lines.append("- No supporting evidence found in indexed data.")
+        answer = "\n".join(lines)
+    elif plan.mode == "composite_claim":
+        answer = composite_claim_answer(plan.topics, retrieved)
+    elif plan.steps and plan.steps[-1].tool == "draft_report":
         answer = final["report"]
     elif plan.steps and plan.steps[0].tool == "query_structured":
         structured = final if plan.steps[-1].tool == "query_structured" else results[0]

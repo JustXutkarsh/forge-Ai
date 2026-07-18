@@ -6,6 +6,7 @@ __pycache__/
 .env
 data/*.db
 data/chroma/
+data/chroma*/
 outputs/logs/
 outputs/reports/
 outputs/profile.json

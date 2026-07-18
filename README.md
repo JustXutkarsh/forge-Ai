@@ -26,7 +26,7 @@ Forge is a portfolio-scale implementation of a retrieval-augmented support inves
 Support data is useful only when it can be searched, counted, and explained consistently. Forge combines two complementary paths:
 
 - **Structured analytics:** SQLite answers exact counts, trends, filters, and group-by questions.
-- **Semantic investigation:** ChromaDB retrieves related tickets using OpenAI embeddings, with a bounded lexical SQLite fallback when semantic retrieval is unavailable.
+- **Semantic investigation:** ChromaDB retrieves related tickets using a locally hosted BGE Sentence Transformers model, with a bounded lexical SQLite fallback when semantic retrieval is unavailable.
 
 Both paths share the same normalized ticket schema. A lightweight planner chooses a tool chain, the executor runs that chain, and the CLI presents either human-readable output or JSON.
 
@@ -165,9 +165,9 @@ Identifiers are allowlisted and values are parameter-bound. Structured results e
 
 When embeddings are available, Forge stores retrieval documents and vectors in the persistent ChromaDB collection `forge_tickets`. Retrieval asks ChromaDB for the top `k` vectors and then reads the corresponding public ticket metadata from SQLite.
 
-### OpenAI embeddings
+### Local Hugging Face embeddings
 
-The default embedding model is `text-embedding-3-large`, configurable through `FORGE_EMBED_MODEL`. Embedding requests are batched, retried up to four attempts, written to ChromaDB, and followed by an SQLite status update.
+The default embedding model is `BAAI/bge-base-en-v1.5`, configurable through `EMBEDDING_MODEL`. Sentence Transformers downloads it once and loads it once per process; document and query vectors are generated locally and written to ChromaDB. Forge does not use the Hugging Face Inference API.
 
 ### Planner and tool routing
 
@@ -213,7 +213,7 @@ Ingestion writes JSON logs to `outputs/logs/`. Ask commands write JSON Lines age
 
 `eval/dataset.json` contains 50 cases spanning structured analytics, semantic search, summaries, anomaly questions, and unsupported questions. The harness evaluates planner routing, retrieval at five, structured-query matching, grounded responses, hallucination classification, and latency.
 
-The evaluation runner processes cases one at a time, keeps only bounded top-k retrieval evidence, reuses lazy OpenAI/Chroma resources, and closes its SQLite connection. It is a local benchmark, not a CI quality gate.
+The evaluation runner processes cases one at a time, keeps only bounded top-k retrieval evidence, reuses the cached local embedding model and lazy Chroma resource, and closes its SQLite connection. It is a local benchmark, not a CI quality gate.
 
 ## Architecture
 
@@ -226,7 +226,7 @@ flowchart TD
     HASH --> INGEST[Shared incremental ingestion]
     INGEST --> SQLITE[(SQLite metadata store)]
     INGEST --> CANDIDATES[New or retrieval-changed IDs]
-    CANDIDATES --> EMBED[OpenAI embedding batches]
+    CANDIDATES --> EMBED[Local BGE embedding batches]
     EMBED --> CHROMA[(Persistent ChromaDB)]
 
     QUESTION[User question] --> ASK[forge ask]
@@ -241,7 +241,7 @@ flowchart TD
     ROUTER --> REPORT[draft_report]
     SQL --> SQLITE
     SEARCH --> EXPAND[Query expansion]
-    EXPAND --> VECTOR{OpenAI key and Chroma available?}
+    EXPAND --> VECTOR{Local BGE model and Chroma available?}
     VECTOR -->|yes| CHROMA
     VECTOR -->|no| LEXICAL[Bounded SQLite lexical fallback]
     CHROMA --> RERANK[Rerank top candidates]
@@ -285,7 +285,8 @@ forge-Ai/
 │   │   ├── ingest.py         # shared CSV/record incremental ingestion
 │   │   └── profile.py        # CSV profile generation
 │   ├── rag/
-│   │   ├── embed.py          # OpenAI embedding batches and targeted embedding
+│   │   ├── embedding.py       # shared cached local embedding service
+│   │   ├── embed.py          # Local embedding batches and targeted embedding
 │   │   ├── rerank.py         # deterministic lexical reranking
 │   │   ├── retrieve.py       # Chroma retrieval and SQLite lexical fallback
 │   │   └── vectorstore.py    # small ChromaDB persistence wrapper
@@ -326,7 +327,7 @@ The current execution path is:
 3. Forge attempts the OpenAI chat-completions tool loop using the configured model (`gpt-4o` by default).
 4. If the OpenAI path is unavailable or fails, `plan_question` creates a deterministic `search_data` plan for this qualitative question.
 5. `search_data` preserves the original question, expands login-related vocabulary, and checks that the query belongs to the supported ticket domain.
-6. Retrieval first attempts OpenAI embeddings plus ChromaDB. If semantic retrieval is unavailable, it searches selected SQLite text fields with bounded lexical conditions.
+6. Retrieval first attempts local BGE embeddings plus ChromaDB. If semantic retrieval is unavailable, it searches selected SQLite text fields with bounded lexical conditions.
 7. Candidates are reranked and reduced to the requested `k` tickets, normally five.
 8. The response carries ticket IDs, confidence, evidence status, and the selected tool sequence.
 9. The CLI prints a human-readable answer by default or the full response object with `--json`.
@@ -363,7 +364,7 @@ The mapping is a Python constant in `forge/search/query_normalizer.py`, making a
 
 ### 3. Semantic search
 
-If `OPENAI_API_KEY` is present, Forge creates a query embedding with `FORGE_EMBED_MODEL` and asks the `forge_tickets` ChromaDB collection for the top candidates. SQLite is then used to fetch the safe public fields for the returned IDs.
+Forge creates a query embedding locally with the configured BGE model and asks the `forge_tickets` ChromaDB collection for the top candidates. SQLite is then used to fetch the safe public fields for the returned IDs. OpenAI is not involved in embedding generation.
 
 ### 4. Lexical fallback
 
@@ -537,8 +538,8 @@ The evaluator is deliberately bounded: it processes one case at a time, retrieve
 ### Requirements
 
 - Python 3.11 or newer.
-- An OpenAI API key for `ask` and embedding operations.
-- Network access to the OpenAI API when using embeddings or the OpenAI tool path.
+- An OpenAI API key for `ask` reasoning and answer generation.
+- Network access to the OpenAI API when using the OpenAI tool path.
 - Network access to the GitHub REST API for GitHub ingestion.
 
 ### Install from the repository
@@ -549,6 +550,14 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+Download and cache the local embedding model once:
+
+```bash
+python -c "from forge.rag.embedding import get_embedding_service; print(get_embedding_service().model_name)"
+```
+
+This downloads `BAAI/bge-base-en-v1.5` from Hugging Face and runs it locally; no Hugging Face inference service is used.
 
 The package metadata in `pyproject.toml` also defines the console script:
 
@@ -574,16 +583,45 @@ Never commit `.env`. It is ignored by `.gitignore`.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `OPENAI_API_KEY` | Yes for `ask` and embedding | none | OpenAI chat and embedding authentication. |
+| `OPENAI_API_KEY` | Yes for `ask` | none | OpenAI reasoning, planning, and answer-generation authentication. |
 | `GITHUB_TOKEN` | No | none | Optional GitHub authentication for private repositories or higher rate limits. |
+| `EMBEDDING_PROVIDER` | No | `huggingface` | Local embedding provider. |
+| `EMBEDDING_MODEL` | No | `BAAI/bge-base-en-v1.5` | Local Sentence Transformers model. |
 | `FORGE_DB` | No | `data/forge.db` | SQLite database path. |
 | `FORGE_CHROMA` | No | `data/chroma` | Persistent ChromaDB path. |
 | `FORGE_OUTPUTS` | No | `outputs` | Log and report root directory. |
 | `FORGE_EMBED_LIMIT` | No | `0` | Status context for an intentional development embedding limit. |
 | `FORGE_MODEL` | No | `gpt-4o` | OpenAI chat-completions model. |
-| `FORGE_EMBED_MODEL` | No | `text-embedding-3-large` | OpenAI embedding model. |
 
-Forge loads `.env` from the project root through `python-dotenv` when `forge.config` is imported. If `OPENAI_API_KEY` is missing, commands that require OpenAI print setup instructions instead of a Python traceback.
+Forge loads `.env` from the project root through `python-dotenv` when `forge.config` is imported. If `OPENAI_API_KEY` is missing, commands that require OpenAI print setup instructions instead of a Python traceback. The local embedding model is downloaded from Hugging Face on first use; subsequent runs use the local cache.
+
+## HTTP API
+
+Forge also provides a thin FastAPI service over the same `forge.agent.executor.ask` pipeline used by the CLI. It does not duplicate planning, SQL routing, retrieval, embeddings, or answer generation. The process loads the local embedding model and Chroma collection once, reuses thread-local SQLite connections, and exposes Swagger at `/docs` and ReDoc at `/redoc`.
+
+Start the development server:
+
+```bash
+uvicorn forge.api.app:app --reload
+```
+
+Check service and retrieval health:
+
+```bash
+curl http://127.0.0.1:8000/
+curl -X POST http://127.0.0.1:8000/health/retrieval
+curl http://127.0.0.1:8000/stats
+```
+
+Ask a grounded question:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Summarize login issues","max_evidence":5}'
+```
+
+The response includes the grounded answer, retrieval strategy, evidence ticket IDs, confidence, and per-stage timings.
 
 ## CLI reference
 
@@ -679,7 +717,7 @@ The `ingest_runs` table stores source, timestamps, loaded/new/changed/skipped co
 
 - `ticket_id` as the Chroma ID;
 - the redacted retrieval document;
-- the OpenAI embedding; and
+- the locally generated BGE embedding; and
 - category, product, and priority metadata.
 
 SQLite remains the source of truth for returned ticket fields and exact analytics.
@@ -704,7 +742,7 @@ The tests cover:
 - SQLite validation and PII-safe structured fields; and
 - evaluation metrics, dataset coverage, bounded answerer resources, and report formatting.
 
-GitHub tests mock HTTP responses. They do not call the live GitHub API. Embedding tests use fake OpenAI/Chroma objects. Production ingestion does not use those fixtures.
+GitHub tests mock HTTP responses. They do not call the live GitHub API. Embedding tests use fake embedding/Chroma objects. Production ingestion does not use those fixtures.
 
 ## Technical decisions and trade-offs
 
@@ -772,7 +810,8 @@ Forge uses and integrates with:
 
 - Python and the Python standard library;
 - SQLite;
-- OpenAI embeddings and chat completions;
+- local Hugging Face Sentence Transformers embeddings;
+- OpenAI chat completions for reasoning and answer generation;
 - ChromaDB;
 - Typer;
 - `python-dotenv`; and

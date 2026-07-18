@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import time
@@ -17,6 +16,7 @@ from forge.agent.tools import MIN_EVIDENCE_CONFIDENCE, SUPPORTED_QUERY_TERMS, su
 from forge.analytics.queries import query_structured
 from forge.config import CHROMA_PATH
 from forge.rag.rerank import rerank
+from forge.rag.embedding import get_embedding_service
 from forge.rag.retrieve import PUBLIC_FIELDS, STOPWORDS
 from forge.rag.vectorstore import ChromaStore
 from forge.search.query_normalizer import expand_query
@@ -55,27 +55,19 @@ class CaseResult:
     error: str | None = None
 
 class EvaluationAnswerer:
-    """Run evaluation answers with one lazy OpenAI/Chroma resource set."""
+    """Run evaluation answers with one lazy local embedding/Chroma resource set."""
 
     def __init__(self) -> None:
-        self._embedding_client: Any | None = None
         self._chroma_store: ChromaStore | None = None
         self._chroma_attempted = False
-        if os.getenv("OPENAI_API_KEY", "").strip():
-            try:
-                from openai import OpenAI
-                self._embedding_client = OpenAI(timeout=60, max_retries=0)
-            except Exception:
-                self._embedding_client = None
 
     def close(self) -> None:
         """Release shared evaluation resources."""
         self._chroma_store = None
-        self._embedding_client = None
 
     def _store(self) -> ChromaStore | None:
         """Open Chroma at most once and only when semantic retrieval is available."""
-        if self._chroma_attempted or self._embedding_client is None:
+        if self._chroma_attempted:
             return self._chroma_store
         self._chroma_attempted = True
         try:
@@ -87,12 +79,10 @@ class EvaluationAnswerer:
     def _semantic_retrieve(self, conn: sqlite3.Connection, query: str, k: int) -> list[dict[str, Any]] | None:
         """Retrieve only top-k rows using the shared embedding client/store."""
         store = self._store()
-        if store is None or self._embedding_client is None:
+        if store is None:
             return None
         try:
-            embedding = self._embedding_client.embeddings.create(
-                model=os.getenv("FORGE_EMBED_MODEL", "text-embedding-3-large"), input=[query]
-            ).data[0].embedding
+            embedding = get_embedding_service().embed_query(query)
             result = store.query(embedding, k)
             ids = list(result.get("ids", [[]])[0][:k])
             if not ids:
