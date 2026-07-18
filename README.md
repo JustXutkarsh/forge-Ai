@@ -1,117 +1,330 @@
-# Forge Ai
+# Forge – AI Support Investigation Platform
 
-![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![Tests](https://img.shields.io/badge/tests-34%20passing-brightgreen)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)
+![Next.js](https://img.shields.io/badge/UI-Next.js%2015-000000?logo=next.js&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-46%20passing-brightgreen)
 ![Status](https://img.shields.io/badge/status-active%20development-yellow)
-![License](https://img.shields.io/badge/license-not%20specified-lightgrey)
 
-Forge is a Python CLI for ingesting support tickets and GitHub Issues, maintaining an incremental SQLite metadata store, building a ChromaDB vector index, and answering support questions with structured analytics or grounded retrieval.
+Forge turns support tickets and GitHub Issues into searchable, explainable investigations. It combines exact SQLite analytics, local semantic retrieval, evidence-aware summaries, and an AI orchestration layer behind a CLI, FastAPI service, and modern web dashboard.
 
-It is designed for investigations such as:
+> Forge is designed for local, inspectable investigations. It answers from indexed support data and refuses to invent evidence when the data cannot support a claim.
 
-```text
-What are the top complaint categories?
-How many payment issues occurred?
-Summarize login issues.
-Why are users unhappy?
+## Contents
+
+- [Project overview](#project-overview)
+- [Key features](#key-features)
+- [How Forge works](#how-forge-works)
+- [Architecture](#architecture)
+- [Folder structure](#folder-structure)
+- [Technologies](#technologies)
+- [Installation](#installation)
+- [Environment variables](#environment-variables)
+- [Running the project](#running-the-project)
+- [Example workflow](#example-workflow)
+- [Application screens](#application-screens)
+- [AI pipeline](#ai-pipeline)
+- [Explainability and grounding](#explainability-and-grounding)
+- [CLI reference](#cli-reference)
+- [HTTP API](#http-api)
+- [Evaluation](#evaluation)
+- [Testing](#testing)
+- [Technical decisions](#technical-decisions)
+- [Future improvements](#future-improvements)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Project overview
+
+Customer-support data often contains the answer to an operational question, but finding it manually is slow. An analyst may need to search thousands of tickets, group categories, compare priorities, read resolutions, and then explain which records support the conclusion.
+
+Forge makes that workflow queryable. A user can ask for an exact count, a category breakdown, or a semantic explanation using the same investigation system. The system chooses between structured SQL and retrieval based on the question, then returns the result with confidence, timings, and supporting ticket IDs.
+
+Forge is different from a normal chatbot in three important ways:
+
+1. It treats SQLite and ChromaDB as the source of investigation evidence.
+2. It separates exact analytics from semantic search instead of using an LLM for every question.
+3. It refuses unsupported questions instead of filling gaps with general-world knowledge.
+
+Forge is useful for portfolio demonstrations, support-operations prototypes, data-engineering experiments, and engineers learning how a grounded RAG system is assembled.
+
+## Key features
+
+### Semantic investigation
+
+Natural-language questions such as “Summarize login issues” are expanded with configurable synonyms, embedded locally with a BGE Sentence Transformers model, and matched against ChromaDB vectors. The original user question is preserved; expansion is used only for retrieval.
+
+### SQL-based investigation
+
+Questions about counts, groupings, trends, filters, and distributions use allowlisted SQLite queries. Examples include “How many payment issues occurred?” and “Show the top 5 labels.” SQL keeps exact metadata questions deterministic and efficient.
+
+### Evidence-backed answers
+
+Investigation responses include the answer, confidence, retrieval strategy, and source ticket IDs. Semantic results are hydrated from SQLite so the final response uses the public ticket fields associated with the retrieved vectors.
+
+### Confidence scoring
+
+Confidence is an evidence signal between `0.0` and `1.0`. Exact SQL lookups are treated as highly confident, SQL aggregations receive a high score, strong semantic evidence receives a calibrated score, and missing evidence produces zero confidence. It is not a statistical probability.
+
+### Retrieval strategy
+
+The response identifies whether evidence came from semantic Chroma retrieval, structured SQLite analysis, or the bounded SQLite lexical fallback used when semantic retrieval is unavailable.
+
+### Execution timings
+
+Forge records stage timings such as configuration, database access, embedding, retrieval, planning, OpenAI calls, summary generation, and final rendering. The API exposes request timings and the CLI writes agent execution logs.
+
+### Expandable evidence cards
+
+The Next.js dashboard displays each returned ticket as an evidence card with its ticket ID, similarity score, summary, and expandable details. This lets a user inspect the records behind a conclusion rather than trusting a single paragraph.
+
+### Explainable AI workflow
+
+The planner produces an inspectable tool plan. Logs record the question, selected tools, tool sequence, retrieved IDs, timings, token usage when available, and final answer. Follow-up evidence explanations can receive the previous investigation explicitly through the API context field.
+
+### Modern dashboard
+
+The frontend provides a responsive investigation workspace with a chat-style question flow, response summaries, evidence, performance metrics, backend status, and friendly error states.
+
+### Settings page
+
+The Settings page shows the configured backend URL and the API-reported embedding and system information. It does not duplicate backend investigation logic.
+
+### System health
+
+The dashboard can call the root status endpoint, statistics endpoint, and retrieval-health endpoint to show API availability, SQLite reachability, Chroma reachability, embedding-model readiness, collection size, and latency.
+
+### Dark mode
+
+The frontend is designed dark-first and supports a theme toggle while preserving the same investigation data and API contract.
+
+## How Forge works
+
+At a high level, an investigation follows this path:
+
+```mermaid
+flowchart TD
+    USER[User question] --> PLANNER[Planner]
+    PLANNER --> ROUTER[Tool routing]
+    ROUTER --> SQL[Structured SQLite query]
+    ROUTER --> RETRIEVER[Semantic or lexical retrieval]
+    SQL --> EVIDENCE[Evidence and results]
+    RETRIEVER --> EVIDENCE
+    EVIDENCE --> REASONING[Reasoning and summarization]
+    REASONING --> GROUNDED[Grounded response]
+    GROUNDED --> OUTPUT[CLI or web UI]
 ```
 
-Forge is a portfolio-scale implementation of a retrieval-augmented support investigation system. It is not a hosted service, a frontend, a general-purpose web search engine, or a customer-management system.
+1. **User question:** The user asks in the CLI, API, or dashboard.
+2. **Planner:** Forge classifies the intent and creates one or more validated tool steps.
+3. **Tool routing:** Exact metadata questions go to SQLite; semantic questions go to retrieval; reports may combine analytics, retrieval, summarization, and drafting.
+4. **Evidence:** SQL results or retrieved ticket records become the factual context.
+5. **Reasoning:** The deterministic tools and optional OpenAI tool-calling path format the result using the available evidence.
+6. **Grounded response:** Forge returns an answer with confidence, retrieval strategy, timings, and sources.
+7. **Output:** The CLI renders human-friendly text by default and JSON with `--json`; the API returns a typed JSON response consumed by the dashboard.
 
-> **Current status:** active development. The repository contains no CI workflow and no `LICENSE` file. The test count above reflects the local suite currently present in `tests/`.
+## Architecture
 
-## Overview
+Forge has two interfaces over one investigation engine:
 
-Support data is useful only when it can be searched, counted, and explained consistently. Forge combines two complementary paths:
+- **Next.js frontend:** Presents questions, answers, evidence, timings, settings, and health information.
+- **FastAPI backend:** Validates HTTP requests and delegates to the existing planner, executor, retrieval, and reasoning functions.
+- **SQLite:** Stores normalized ticket metadata, freshness hashes, embedding status, and ingestion runs.
+- **ChromaDB:** Stores retrieval documents and local embedding vectors.
+- **Sentence Transformers:** Generates document and query embeddings locally using the configured BGE model.
+- **OpenAI:** Provides the configured reasoning/tool-calling path and answer-generation capability; it is not used for embedding generation.
 
-- **Structured analytics:** SQLite answers exact counts, trends, filters, and group-by questions.
-- **Semantic investigation:** ChromaDB retrieves related tickets using a locally hosted BGE Sentence Transformers model, with a bounded lexical SQLite fallback when semantic retrieval is unavailable.
+```mermaid
+flowchart LR
+    CSV[CSV source] --> NORMALIZE[Normalize records]
+    GITHUB[GitHub Issues REST API] --> NORMALIZE
+    NORMALIZE --> HASH[record_hash + retrieval_hash]
+    HASH --> SQLITE[(SQLite)]
+    HASH --> CANDIDATES[New or retrieval-changed IDs]
+    CANDIDATES --> LOCAL_EMBED[Local BGE embeddings]
+    LOCAL_EMBED --> CHROMA[(ChromaDB)]
 
-Both paths share the same normalized ticket schema. A lightweight planner chooses a tool chain, the executor runs that chain, and the CLI presents either human-readable output or JSON.
+    FRONTEND[Next.js dashboard] --> API[FastAPI]
+    CLI[Forge CLI] --> ENGINE[Investigation engine]
+    API --> ENGINE
+    ENGINE --> PLANNER[Planner]
+    PLANNER --> SQL_TOOL[Structured tools]
+    PLANNER --> SEARCH_TOOL[Search tools]
+    SQL_TOOL --> SQLITE
+    SEARCH_TOOL --> QUERY[Query expansion]
+    QUERY --> LOCAL_EMBED
+    CHROMA --> RERANK[Reranking and evidence selection]
+    SQLITE --> RERANK
+    RERANK --> ANSWER[Grounded answer]
+    ANSWER --> FRONTEND
+    ANSWER --> CLI
+```
 
-Forge is intended for engineers and analysts who want a local, inspectable support-data workflow with:
+The important boundary is that the API and CLI call the same engine. The frontend does not contain a second planner, SQL layer, retriever, or summarizer.
 
-- repeatable ingestion from CSV or GitHub Issues;
-- incremental refreshes that avoid unnecessary embeddings;
-- exact metadata analytics alongside semantic search;
-- evidence-bearing answers with ticket IDs;
-- explicit refusal when the indexed data cannot support an answer; and
-- a small evaluation harness for routing and retrieval experiments.
+## Folder structure
 
-## Demo
+```text
+forge-Ai/
+├── forge/
+│   ├── agent/
+│   │   ├── executor.py       # Executes plans and assembles responses
+│   │   ├── planner.py        # Intent classification and tool plans
+│   │   └── tools.py          # Search, summary, report, and anomaly helpers
+│   ├── analytics/
+│   │   ├── queries.py        # Allowlisted SQLite operations
+│   │   └── schema.py         # SQLite schema and lightweight migrations
+│   ├── api/
+│   │   ├── app.py            # FastAPI application and lifespan
+│   │   ├── dependencies.py   # Process resources and SQLite connections
+│   │   ├── models.py         # Pydantic request/response models
+│   │   └── routes.py         # HTTP endpoints
+│   ├── pipeline/
+│   │   ├── clean.py          # Record normalization and retrieval documents
+│   │   ├── github.py         # GitHub REST adapter and field mapping
+│   │   ├── ingest.py         # Shared incremental ingestion
+│   │   └── profile.py        # CSV profiling
+│   ├── rag/
+│   │   ├── embedding.py      # Cached local embedding service
+│   │   ├── embed.py          # Batch and targeted embedding
+│   │   ├── rerank.py         # Deterministic candidate reranking
+│   │   ├── retrieve.py       # Chroma retrieval and SQLite fallback
+│   │   └── vectorstore.py    # ChromaDB persistence wrapper
+│   ├── search/
+│   │   └── query_normalizer.py # Configurable synonym expansion
+│   ├── bootstrap.py          # Runtime data-artifact preparation
+│   ├── cli.py                # CLI commands and terminal rendering
+│   └── config.py             # .env loading and application paths
+├── frontend/
+│   ├── app/                  # Dashboard, Settings, and About routes
+│   ├── components/           # Dashboard, evidence, health, and UI components
+│   ├── hooks/                # TanStack Query API hooks
+│   └── lib/                  # API client and TypeScript types
+├── eval/
+│   ├── dataset.json          # Representative evaluation cases
+│   ├── evaluator.py          # Case-by-case evaluation runner
+│   ├── metrics.py            # Evaluation metric functions
+│   └── run_eval.py           # Evaluation CLI and report
+├── tests/                    # Unit and API tests
+├── data/                     # Runtime SQLite and Chroma data; ignored by Git
+├── outputs/                  # Runtime logs and reports; ignored by Git
+├── .env.example              # Local configuration template
+├── pyproject.toml            # Python package metadata
+└── requirements.txt          # Pinned Python dependencies
+```
 
-### Install and configure
+## Technologies
+
+| Technology | Purpose | Why it is used |
+| --- | --- | --- |
+| Python 3.11+ | Core backend and CLI | Strong standard-library support and modern typing. |
+| FastAPI | HTTP API | Typed request validation, OpenAPI, Swagger, and ReDoc. |
+| Uvicorn | ASGI server | Lightweight local API server. |
+| Next.js 15 | Frontend framework | App Router structure and production React tooling. |
+| React 19 | UI components | Component model for the investigation dashboard. |
+| Tailwind CSS | Styling | Consistent responsive utility styling. |
+| Framer Motion | UI motion | Loading, hover, and transition behavior. |
+| TanStack Query | Frontend data fetching | Request caching, loading states, retries, and invalidation. |
+| SQLite | Metadata and analytics store | Portable exact queries with no separate database service. |
+| ChromaDB | Vector store | Persistent local semantic search. |
+| Sentence Transformers | Local embeddings | Keeps embedding generation local after the model download. |
+| BAAI BGE | Default embedding model | Strong general English retrieval for the support-ticket corpus. |
+| OpenAI API | Reasoning and tool-calling path | Produces flexible orchestration and answer reasoning while evidence remains local. |
+| Hugging Face model files | Model distribution | Downloads the local Sentence Transformers model; Forge does not use the inference API. |
+
+## Installation
+
+### Prerequisites
+
+- Python 3.11 or newer.
+- Node.js and npm for the frontend.
+- An OpenAI API key for `ask` and the reasoning path.
+- Network access when downloading the local embedding model or ingesting GitHub Issues.
+
+### Clone the repository
 
 ```bash
-git clone <your-fork-or-checkout>
+git clone https://github.com/JustXutkarsh/forge-Ai.git
 cd forge-Ai
+```
 
+### Create and activate the Python environment
+
+```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
+```
+
+On Windows PowerShell, use `.venv\Scripts\Activate.ps1` instead of the `source` command.
+
+### Install backend dependencies
+
+```bash
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+```
 
+### Configure local settings
+
+```bash
 cp .env.example .env
-# Edit .env and set OPENAI_API_KEY.
 ```
 
-### Ingest a CSV dataset
+Edit `.env` and set `OPENAI_API_KEY`. The file is ignored by Git and must not be committed.
+
+### Download the local embedding model
+
+```bash
+python -c "from forge.rag.embedding import get_embedding_service; print(get_embedding_service().model_name)"
+```
+
+The default `BAAI/bge-base-en-v1.5` model is downloaded and cached locally on first use. Embeddings are generated locally; Forge does not call the Hugging Face Inference API.
+
+### Install frontend dependencies
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+## Environment variables
+
+The backend loads `.env` from the project root through `python-dotenv`.
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `OPENAI_API_KEY` | For `ask` and OpenAI reasoning | none | Authenticates OpenAI planning/tool-calling and answer reasoning. |
+| `GITHUB_TOKEN` | No | none | Optional GitHub authentication for private repositories or higher public-API rate limits. |
+| `EMBEDDING_PROVIDER` | No | `huggingface` | Local embedding provider. |
+| `EMBEDDING_MODEL` | No | `BAAI/bge-base-en-v1.5` | Sentence Transformers model name. |
+| `FORGE_DB` | No | `data/forge.db` | SQLite database path. |
+| `FORGE_CHROMA` | No | `data/chroma.rebuilt` | Persistent ChromaDB path. |
+| `FORGE_OUTPUTS` | No | `outputs` | Root directory for logs and reports. |
+| `FORGE_EMBED_LIMIT` | No | `0` | Status context for an intentional development embedding limit. |
+| `FORGE_MODEL` | No | `gpt-4o` | OpenAI chat-completions model. |
+
+If `OPENAI_API_KEY` is missing, Forge prints setup instructions rather than exposing a Python traceback. `GITHUB_TOKEN` remains optional for public repositories.
+
+## Running the project
+
+### Prepare data
+
+Forge can ingest a CSV that matches the normalized support-ticket schema:
+
+```bash
+python -m forge.cli ingest --source /path/to/customer_support_tickets.csv
+```
+
+Or ingest real GitHub Issues through the GitHub REST API:
 
 ```bash
 python -m forge.cli ingest \
-  --source /path/to/customer_support_tickets.csv
+  --source github \
+  --repo microsoft/vscode
 ```
 
-The command writes normalized metadata to `data/forge.db`. New records and records whose retrieval content changed are marked as embedding candidates.
-
-### Embed records from the current ingestion run
-
-```bash
-python -m forge.cli ingest \
-  --source /path/to/customer_support_tickets.csv \
-  --embed
-```
-
-With `--embed`, Forge embeds only records inserted or retrieval-content-updated by that ingestion run. It does not automatically embed the entire pending backlog.
-
-### Ask a question
-
-```bash
-python -m forge.cli ask "Summarize login issues"
-```
-
-Typical human-readable output:
-
-```text
-Question
-Summarize login issues
-
-Summary
-Recurring pattern: Login Issue was the dominant category in 5 of 5 retrieved tickets.
-Likely resolution: Credentials reset (3 tickets).
-Important observations: High was the most common priority and Closed was the most common status.
-
-Evidence
-• Ticket 113
-• Ticket 123
-
-Confidence
-0.86
-```
-
-Use `--json` when another program needs the machine-readable response:
-
-```bash
-python -m forge.cli ask "How many payment issues occurred?" --json
-```
-
-### Inspect pipeline health
-
-```bash
-python -m forge.cli status
-```
-
-### Ingest GitHub Issues
+Add `--embed` to embed only records inserted or retrieval-content-updated during the current ingestion run:
 
 ```bash
 python -m forge.cli ingest \
@@ -120,532 +333,61 @@ python -m forge.cli ingest \
   --embed
 ```
 
-Public repositories work without `GITHUB_TOKEN`. A token is optional and can increase rate limits or authorize access to private repositories.
+The separate Python function `embed_pending()` remains available for intentionally processing an existing embedding backlog.
 
-### Screenshots and GIFs
+### Start the backend
 
-The repository currently contains no checked-in screenshots or demo GIF. Suggested documentation assets:
-
-```text
-<!-- Screenshot placeholder: forge status output -->
-<!-- GIF placeholder: CSV ingestion followed by a grounded ask -->
-```
-
-## Features
-
-### Incremental ingestion
-
-Forge computes two SHA-256 hashes for each normalized record:
-
-- `record_hash` covers every normalized ticket field.
-- `retrieval_hash` covers only the fields used to build the retrieval document: issue description, resolution notes, category, product, and priority.
-
-This distinction lets Forge update metadata without re-embedding unchanged retrieval text. New records and retrieval-content changes become embedding candidates; unchanged records are skipped; metadata-only changes preserve the previous embedding status.
-
-### CSV ingestion
-
-`forge.pipeline.ingest.ingest_csv` reads a CSV with the existing ticket schema, normalizes text and numeric fields, validates `ticket_id`, computes hashes, and upserts rows into SQLite. Invalid rows are counted and up to 100 sample errors are written to the ingestion log.
-
-### GitHub Issues ingestion
-
-`forge.pipeline.github` calls the GitHub REST API, follows pagination, ignores pull requests, maps issues into the same ticket schema, and delegates persistence to the shared `ingest_records` path. GitHub is therefore another source adapter, not a second storage or embedding pipeline.
-
-### SQLite analytics
-
-The allowlisted structured-query layer supports:
-
-- counts;
-- group-by aggregations;
-- monthly trends based on `ticket_created_date`; and
-- filtered ticket results.
-
-Identifiers are allowlisted and values are parameter-bound. Structured results expose safe ticket fields and omit customer email and other private identity fields.
-
-### ChromaDB retrieval
-
-When embeddings are available, Forge stores retrieval documents and vectors in the persistent ChromaDB collection `forge_tickets`. Retrieval asks ChromaDB for the top `k` vectors and then reads the corresponding public ticket metadata from SQLite.
-
-### Local Hugging Face embeddings
-
-The default embedding model is `BAAI/bge-base-en-v1.5`, configurable through `EMBEDDING_MODEL`. Sentence Transformers downloads it once and loads it once per process; document and query vectors are generated locally and written to ChromaDB. Forge does not use the Hugging Face Inference API.
-
-### Planner and tool routing
-
-Forge has a deterministic planner for local, inspectable execution and an optional OpenAI tool-calling path. The deterministic planner routes metadata questions to `query_structured`, semantic questions to `search_data`, qualitative summaries through `search_data` followed by `summarize`, and reports through a multi-step chain.
-
-Top-N routing is intent-aware: `top 5 labels` is structured metadata, while `top 5 authentication issues`, `top 5 login problems`, and `top 5 browser crashes` are semantic support questions.
-
-### Query normalization
-
-Before retrieval, Forge preserves the original question and appends configurable synonym terms. For example, an authentication query is expanded with login, sign-in, credential, and password vocabulary. Similar mappings cover payment/billing/refund, performance/slow/lag/freeze, synchronization, crashes/failures, and browser names.
-
-### Evidence-aware summaries
-
-The deterministic summarizer prioritizes evidence text and structured metadata in this order:
-
-1. category signals inferred from issue description and resolution notes;
-2. the most common resolution;
-3. the most common priority; and
-4. the most common status.
-
-It reports ties explicitly and uses the metadata category only when the evidence text does not provide a stronger category signal. It does not call an LLM to concatenate arbitrary ticket descriptions.
-
-### Hallucination guard
-
-Unsupported-domain questions are rejected before retrieval when they contain no supported support-ticket vocabulary. Empty or insufficient retrieval produces `No supporting evidence found in indexed data.` rather than an invented answer. OpenAI tool responses are also checked for evidence before being returned.
-
-### Confidence scoring
-
-The response includes a confidence value:
-
-- exact SQL filters: `1.00`;
-- SQL aggregations and trends: `0.95`;
-- supported RAG evidence: calibrated into weak-to-strong evidence bands;
-- insufficient or unsupported evidence: `0.00`.
-
-Confidence is a retrieval/evidence signal, not a statistical probability or a guarantee of factual correctness.
-
-### Structured logs and reports
-
-Ingestion writes JSON logs to `outputs/logs/`. Ask commands write JSON Lines agent logs containing the question, selected tools, tool sequence, retrieved ticket IDs, latency, token usage, final answer, and deterministic plan when available. Weekly reports are written as Markdown to `outputs/reports/`.
-
-### Evaluation harness
-
-`eval/dataset.json` contains 50 cases spanning structured analytics, semantic search, summaries, anomaly questions, and unsupported questions. The harness evaluates planner routing, retrieval at five, structured-query matching, grounded responses, hallucination classification, and latency.
-
-The evaluation runner processes cases one at a time, keeps only bounded top-k retrieval evidence, reuses the cached local embedding model and lazy Chroma resource, and closes its SQLite connection. It is a local benchmark, not a CI quality gate.
-
-## Architecture
-
-```mermaid
-flowchart TD
-    CSV[CSV support tickets] --> NORMALIZE[Normalize and clean]
-    GH[GitHub Issues REST API] --> MAP[Map issue fields]
-    MAP --> NORMALIZE
-    NORMALIZE --> HASH[Compute record_hash and retrieval_hash]
-    HASH --> INGEST[Shared incremental ingestion]
-    INGEST --> SQLITE[(SQLite metadata store)]
-    INGEST --> CANDIDATES[New or retrieval-changed IDs]
-    CANDIDATES --> EMBED[Local BGE embedding batches]
-    EMBED --> CHROMA[(Persistent ChromaDB)]
-
-    QUESTION[User question] --> ASK[forge ask]
-    ASK --> ORCHESTRATE{OpenAI tool path available?}
-    ORCHESTRATE -->|yes| TOOLS[Tool schemas and tool calls]
-    ORCHESTRATE -->|no or failed| PLAN[Deterministic planner]
-    PLAN --> ROUTER[Executor tool routing]
-    TOOLS --> ROUTER
-    ROUTER --> SQL[query_structured]
-    ROUTER --> SEARCH[search_data]
-    ROUTER --> SUMMARY[summarize]
-    ROUTER --> REPORT[draft_report]
-    SQL --> SQLITE
-    SEARCH --> EXPAND[Query expansion]
-    EXPAND --> VECTOR{Local BGE model and Chroma available?}
-    VECTOR -->|yes| CHROMA
-    VECTOR -->|no| LEXICAL[Bounded SQLite lexical fallback]
-    CHROMA --> RERANK[Rerank top candidates]
-    LEXICAL --> RERANK
-    RERANK --> SUMMARY
-    SUMMARY --> ANSWER[Grounded answer with evidence]
-    SQL --> ANSWER
-    REPORT --> ANSWER
-    ANSWER --> CLI[Human output or --json]
-    ASK --> LOGS[outputs/logs]
-```
-
-### What each arrow means
-
-- CSV and GitHub inputs enter different source adapters, then converge at normalization.
-- Normalization makes both sources fit the same SQLite schema and retrieval-document format.
-- Hashing decides whether a row is new, unchanged, metadata-only changed, or retrieval-content changed.
-- Only new or retrieval-changed IDs enter the embedding path.
-- SQLite remains the authoritative metadata and analytics store; ChromaDB stores searchable vectors and retrieval documents.
-- `forge ask` first attempts the OpenAI tool-calling path when configured. If that path is unavailable or raises an exception, the deterministic planner is used.
-- The executor sends exact metadata questions to SQLite and semantic questions through query expansion, vector retrieval, or lexical fallback.
-- Retrieved evidence is reranked and passed to the deterministic summarizer when a summary is requested.
-- The final response is rendered for a human terminal by default, or as JSON with `--json`.
-- Agent execution metadata is appended to `outputs/logs/`.
-
-## Folder structure
-
-```text
-forge-Ai/
-├── forge/
-│   ├── agent/
-│   │   ├── executor.py       # ask orchestration, deterministic execution, reports, logs
-│   │   ├── planner.py        # plan objects, tool schemas, intent routing, OpenAI tool loop
-│   │   └── tools.py          # search, summary, structured/anomaly helper tools
-│   ├── analytics/
-│   │   ├── queries.py        # allowlisted SQLite operations
-│   │   └── schema.py         # tickets/ingest_runs schema and light migration
-│   ├── pipeline/
-│   │   ├── clean.py          # normalization, retrieval documents, two hashes
-│   │   ├── github.py         # GitHub REST adapter and issue mapping
-│   │   ├── ingest.py         # shared CSV/record incremental ingestion
-│   │   └── profile.py        # CSV profile generation
-│   ├── rag/
-│   │   ├── embedding.py       # shared cached local embedding service
-│   │   ├── embed.py          # Local embedding batches and targeted embedding
-│   │   ├── rerank.py         # deterministic lexical reranking
-│   │   ├── retrieve.py       # Chroma retrieval and SQLite lexical fallback
-│   │   └── vectorstore.py    # small ChromaDB persistence wrapper
-│   ├── search/
-│   │   └── query_normalizer.py # configurable additive synonym expansion
-│   ├── cli.py                # Typer CLI and argparse fallback renderer
-│   └── config.py             # .env loading, paths, limits, key validation
-├── eval/
-│   ├── dataset.json          # active 50-case evaluation dataset
-│   ├── evaluator.py          # bounded case-by-case evaluation harness
-│   ├── metrics.py            # pure metric functions
-│   ├── run_eval.py           # CLI entry point and terminal report
-│   ├── eval_set.json         # small legacy/reference query fixture
-│   └── structured_eval_set.json # small legacy/reference structured fixture
-├── tests/                    # unit tests with local fixtures and mocked HTTP/OpenAI paths
-├── data/                     # runtime SQLite and ChromaDB data; ignored by Git
-├── outputs/                  # runtime logs and reports; ignored by Git
-├── .env.example              # configuration template
-├── pyproject.toml            # package metadata and forge console script
-├── requirements.txt          # runtime dependencies
-└── README.md
-```
-
-Runtime directories and generated files are intentionally ignored by `.gitignore`. The repository also contains local Python cache files in some checkouts; they are not application modules.
-
-## End-to-end workflow
-
-Consider:
-
-```bash
-python -m forge.cli ask "Why are login failures increasing?"
-```
-
-The current execution path is:
-
-1. `forge.config` loads the project-root `.env` when `python-dotenv` is installed and resolves database, Chroma, output, model, and embedding-limit settings.
-2. The CLI opens SQLite, initializes the schema if needed, and requires `OPENAI_API_KEY` for `ask`.
-3. Forge attempts the OpenAI chat-completions tool loop using the configured model (`gpt-4o` by default).
-4. If the OpenAI path is unavailable or fails, `plan_question` creates a deterministic `search_data` plan for this qualitative question.
-5. `search_data` preserves the original question, expands login-related vocabulary, and checks that the query belongs to the supported ticket domain.
-6. Retrieval first attempts local BGE embeddings plus ChromaDB. If semantic retrieval is unavailable, it searches selected SQLite text fields with bounded lexical conditions.
-7. Candidates are reranked and reduced to the requested `k` tickets, normally five.
-8. The response carries ticket IDs, confidence, evidence status, and the selected tool sequence.
-9. The CLI prints a human-readable answer by default or the full response object with `--json`.
-10. `_log_agent_run` appends timing, sources, token usage, and answer details to the daily agent JSONL log.
-
-The phrase “increasing” does not currently cause a time-series trend query by itself. Structured routing requires terms such as `trend`, `over time`, `monthly`, or `by month`; otherwise this example is treated as a semantic support question.
-
-## Retrieval pipeline
-
-### 1. Retrieval document construction
-
-`retrieval_document` creates a text document from:
-
-```text
-issue_description
-resolution_notes
-category
-product
-priority
-```
-
-Customer name, email, and phone-like values are redacted from that document. These fields also define `retrieval_hash`, so changes to them trigger re-embedding.
-
-### 2. Query expansion
-
-The normalizer appends terms without replacing the user query. For example:
-
-```text
-authentication problems
-→ authentication problems login login issue authentication sign in signin credential password
-```
-
-The mapping is a Python constant in `forge/search/query_normalizer.py`, making additions straightforward and reviewable.
-
-### 3. Semantic search
-
-Forge creates a query embedding locally with the configured BGE model and asks the `forge_tickets` ChromaDB collection for the top candidates. SQLite is then used to fetch the safe public fields for the returned IDs. OpenAI is not involved in embedding generation.
-
-### 4. Lexical fallback
-
-If the key is absent or semantic retrieval raises an exception, Forge tokenizes the expanded query, removes a small stopword list, and searches `issue_description`, `resolution_notes`, `category`, `product`, and `priority` with SQLite `LIKE` predicates. The fallback bounds the raw result set at 500 rows before reranking.
-
-### 5. Reranking and evidence selection
-
-The local reranker counts query-word occurrences in each candidate and returns the requested `k` items. Retrieval distance or lexical score is converted into a confidence signal. Results below the minimum evidence threshold are discarded.
-
-### 6. Summarization
-
-The summarizer works only from the retrieved ticket dictionaries. It reports a recurring category, likely resolution, common priority, common status, and repeated supporting context when available. It does not invent facts from outside the retrieved evidence.
-
-## Analytics pipeline
-
-`query_structured` accepts one of four allowlisted operations:
-
-| Operation | Behavior |
-| --- | --- |
-| `count` | Exact `COUNT(*)`, optionally filtered or date-bounded. |
-| `group_by` | Counts values of an allowlisted field, ordered by count and value. |
-| `trend_over_time` | Groups by the `YYYY-MM` prefix of `ticket_created_date`. |
-| `filter` | Returns safe ticket fields, ordered by creation date, with a bounded limit. |
-
-The planner selects structured SQL for metadata and aggregation intent:
-
-```text
-top 5 labels                 → query_structured, group_by
-top complaint categories     → query_structured, group_by category
-how many payment issues      → query_structured, count, category filter
-show monthly ticket trends   → query_structured, trend_over_time
-top 5 authentication issues  → search_data
-```
-
-Explicit `top N` values are passed through the plan and parameterized in SQL. The SQL layer clamps result limits to the range 1–1000.
-
-## Incremental ingestion
-
-### Freshness decision
-
-For each normalized record:
-
-```text
-new record
-  → insert with embedding_status = pending
-  → add ticket ID to current-run embedding candidates
-
-record_hash unchanged
-  → skip the row
-  → no embedding candidate
-
-record_hash changed, retrieval_hash unchanged
-  → update SQLite metadata
-  → preserve embedding status
-  → no embedding candidate
-
-retrieval_hash changed
-  → update SQLite metadata
-  → mark pending
-  → add ticket ID to current-run embedding candidates
-```
-
-The ingestion function returns `embedding_ticket_ids`. The CLI passes exactly those IDs to `embed_ticket_ids` when `--embed` is specified. `embed_pending` remains available as a Python function for intentional backlog processing, but it is not exposed as a separate CLI subcommand.
-
-### Embedding lifecycle
-
-1. The selected SQLite rows are loaded in batches.
-2. Retrieval documents are built and sent to OpenAI.
-3. IDs, documents, embeddings, and small Chroma metadata are upserted.
-4. SQLite rows are marked `embedding_status='embedded'` and committed.
-5. Progress is printed to stderr.
-
-`FORGE_EMBED_LIMIT` is read by the status renderer to describe an intentional development limit. It does not itself slice the current embedding candidate list; the current project data and ingest workflow use it as status context.
-
-## GitHub Issues ingestion
-
-Forge uses the GitHub REST API endpoint for all issues in a repository with `state=all` and `per_page=100`. It follows the API `Link` header and also advances pages when a full page is returned without a link. Pull requests are ignored because GitHub represents them in the issues endpoint with a `pull_request` field.
-
-### Field mapping
-
-| GitHub value | Forge field |
-| --- | --- |
-| issue ID, falling back to issue number | `ticket_id` |
-| first label, or `Uncategorized` | `category` |
-| title plus body | `issue_description` |
-| open/closed state plus latest non-empty closing comment | `resolution_notes` |
-| recognized priority labels | `priority` |
-| issue state | `status` |
-| constant | `channel = GitHub` |
-| repository name | `product` |
-| constant | `region = Unknown` |
-| `created_at` date | `ticket_created_date` |
-| `updated_at` timestamp | `updated_date` |
-| `closed_at` date for closed issues | `ticket_resolved_date` |
-
-Priority labels containing `urgent`, `critical`, or `p0` map to `Urgent`; `high` or `p1` map to `High`; `low` or `p3` map to `Low`; all other cases map to `Medium`.
-
-### Errors
-
-Invalid repository syntax, not-found/private repositories, authentication failures, rate limits, malformed responses, and network errors are converted into stable error results for the CLI. Public repositories do not require `GITHUB_TOKEN`.
-
-## Hallucination prevention
-
-Forge is grounded in the indexed dataset, not in general world knowledge. For example:
-
-```bash
-python -m forge.cli ask "Who is the CEO?"
-```
-
-The query does not contain supported ticket-domain vocabulary, so retrieval returns no tickets and the answer is:
-
-```text
-No supporting evidence found in indexed data.
-```
-
-This guard has a defined scope. It prevents unsupported answers from the indexed support workflow; it is not a general safety filter, PII classifier, or external fact-checking service.
-
-## Agent orchestration
-
-The tool set declared in `forge.agent.planner` is:
-
-| Tool | Intended use |
-| --- | --- |
-| `search_data` | Semantic lookup, explanations, and related tickets. |
-| `query_structured` | Counts, aggregations, trends, group-bys, and allowlisted filters. |
-| `summarize` | Summarization after `search_data` provides tickets. |
-| `draft_report` | Drafting after analytics and evidence preparation. |
-| `flag_anomaly` | Helper for selecting the highest-volume category in the current implementation. |
-
-The OpenAI path exposes these schemas to chat completions and allows up to five tool-call rounds. The deterministic path is inspectable and testable without making a chat completion, but `forge ask` still requires an API key before either path is attempted.
-
-### Current anomaly scope
-
-The evaluation dataset contains anomaly questions and the tool schema contains `flag_anomaly`. However, the current deterministic `plan_question` implementation does not yet classify anomaly wording into that tool, and the helper currently reports the highest-volume category rather than a time-series spike detector. This README intentionally does not describe anomaly detection as complete functionality.
-
-## Evaluation
-
-Run the active 50-case evaluation set:
-
-```bash
-python eval/run_eval.py --db data/forge.db
-```
-
-Use a different dataset or machine-readable aggregate output:
-
-```bash
-python eval/run_eval.py \
-  --db data/forge.db \
-  --dataset eval/dataset.json \
-  --json
-```
-
-The terminal report contains:
-
-| Metric | Meaning in the evaluation harness |
-| --- | --- |
-| Recall@5 | Fraction of gold-relevant tickets retrieved in the first five results. |
-| Precision@5 | The pure metric function defines this as the fraction of the first five retrieved results classified as relevant; the current case harness supplies its top-k gold hits as the relevant set, so treat the aggregate as a baseline until gold-set handling is strengthened. |
-| Planner Accuracy | Fraction of cases whose deterministic tool chain exactly matches `expected_tools`. |
-| Structured Query Accuracy | Fraction of cases whose first structured step matches the expected operation and field. |
-| Grounded Responses | Fraction of cases not classified as hallucinations. |
-| Hallucination Rate | Fraction of cases with unsupported claims, missing expected refusal, or evaluation errors. |
-| Latency | Average case execution time in milliseconds. |
-
-The active dataset contains 15 structured, 10 semantic, 10 summary, 5 anomaly, and 10 unsupported cases. `eval/eval_set.json` and `eval/structured_eval_set.json` are small legacy/reference fixtures; `run_eval.py` uses `eval/dataset.json` by default.
-
-The evaluator is deliberately bounded: it processes one case at a time, retrieves only top-k evidence, avoids loading the full Chroma collection, reuses shared lazy resources, and closes the database connection in `run_eval.py`.
-
-## Installation
-
-### Requirements
-
-- Python 3.11 or newer.
-- An OpenAI API key for `ask` reasoning and answer generation.
-- Network access to the OpenAI API when using the OpenAI tool path.
-- Network access to the GitHub REST API for GitHub ingestion.
-
-### Install from the repository
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-Download and cache the local embedding model once:
-
-```bash
-python -c "from forge.rag.embedding import get_embedding_service; print(get_embedding_service().model_name)"
-```
-
-This downloads `BAAI/bge-base-en-v1.5` from Hugging Face and runs it locally; no Hugging Face inference service is used.
-
-The package metadata in `pyproject.toml` also defines the console script:
-
-```bash
-forge --help
-```
-
-The module form remains supported:
-
-```bash
-python -m forge.cli --help
-```
-
-## Configuration
-
-Create a local `.env` from the committed template:
-
-```bash
-cp .env.example .env
-```
-
-Never commit `.env`. It is ignored by `.gitignore`.
-
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `OPENAI_API_KEY` | Yes for `ask` | none | OpenAI reasoning, planning, and answer-generation authentication. |
-| `GITHUB_TOKEN` | No | none | Optional GitHub authentication for private repositories or higher rate limits. |
-| `EMBEDDING_PROVIDER` | No | `huggingface` | Local embedding provider. |
-| `EMBEDDING_MODEL` | No | `BAAI/bge-base-en-v1.5` | Local Sentence Transformers model. |
-| `FORGE_DB` | No | `data/forge.db` | SQLite database path. |
-| `FORGE_CHROMA` | No | `data/chroma.rebuilt` | Persistent ChromaDB path. |
-| `FORGE_OUTPUTS` | No | `outputs` | Log and report root directory. |
-| `FORGE_EMBED_LIMIT` | No | `0` | Status context for an intentional development embedding limit. |
-| `FORGE_MODEL` | No | `gpt-4o` | OpenAI chat-completions model. |
-| `FORGE_DB_URL` | Render only when `data/forge.db` is absent | none | HTTPS URL for the SQLite artifact downloaded at API startup. |
-| `FORGE_CHROMA_URL` | Render only when `data/chroma.rebuilt` is absent | none | HTTPS URL for the Chroma ZIP artifact downloaded at API startup. |
-
-Forge loads `.env` from the project root through `python-dotenv` when `forge.config` is imported. If `OPENAI_API_KEY` is missing, commands that require OpenAI print setup instructions instead of a Python traceback. The local embedding model is downloaded from Hugging Face on first use; subsequent runs use the local cache.
-
-## Render deployment
-
-Forge keeps the SQLite database and Chroma files out of Git because they are large and generated data artifacts. The FastAPI startup sequence downloads them only when they are missing locally, so local development is unchanged when `data/forge.db` and `data/chroma.rebuilt` already exist.
-
-1. Upload `data/forge.db` and the contents of `data/chroma.rebuilt` to durable HTTPS object storage. Create the Chroma archive from the directory contents so that `chroma.sqlite3` is at the archive root:
-
-   ```bash
-   cd data/chroma.rebuilt
-   zip -r ../chroma.zip .
-   ```
-
-2. Create a Render Web Service from this repository. Use Python 3.11 or newer, and configure:
-
-   ```text
-   Build Command: pip install -r requirements.txt
-   Start Command: uvicorn forge.api.app:app --host 0.0.0.0 --port $PORT
-   ```
-
-3. Add these environment variables in Render. Keep the artifact URLs private or use signed URLs when the data must not be public:
-
-   ```text
-   OPENAI_API_KEY=...
-   FORGE_DB_URL=https://storage.example.com/forge.db
-   FORGE_CHROMA_URL=https://storage.example.com/chroma.zip
-   ```
-
-   `GITHUB_TOKEN` remains optional. `FORGE_DB_URL` and `FORGE_CHROMA_URL` are required only when their corresponding local artifacts are missing.
-
-At startup Forge streams each download to disk, retries failures up to three times, extracts Chroma into `data/chroma.rebuilt`, removes the temporary ZIP, and only then initializes SQLite and Chroma. A failed download stops application startup with a clear error instead of starting an unusable service. Render Free has ephemeral local storage, so the artifacts may be downloaded again after a service restart or redeploy.
-
-## HTTP API
-
-Forge also provides a thin FastAPI service over the same `forge.agent.executor.ask` pipeline used by the CLI. It does not duplicate planning, SQL routing, retrieval, embeddings, or answer generation. The process loads the local embedding model and Chroma collection once, reuses thread-local SQLite connections, and exposes Swagger at `/docs` and ReDoc at `/redoc`.
-
-Start the development server:
+From the repository root:
 
 ```bash
 uvicorn forge.api.app:app --reload
 ```
 
-Check service and retrieval health:
+The API starts on `http://127.0.0.1:8000`. Swagger is available at `/docs` and ReDoc at `/redoc`.
+
+### Start the frontend
+
+In a second terminal:
 
 ```bash
-curl http://127.0.0.1:8000/
-curl -X POST http://127.0.0.1:8000/health/retrieval
-curl http://127.0.0.1:8000/stats
+cd frontend
+npm run dev
 ```
 
-Ask a grounded question:
+The dashboard starts on `http://localhost:3000`. The frontend uses the configured backend URL and communicates only with the FastAPI endpoints.
+
+## Example workflow
+
+Suppose a user asks:
+
+```text
+Summarize login issues.
+```
+
+Forge handles it as follows:
+
+1. The planner recognizes a semantic summary request and creates a `search_data` step followed by `summarize`.
+2. The query normalizer expands login vocabulary with related terms such as authentication, sign in, credentials, and password.
+3. The local BGE model embeds the expanded retrieval query.
+4. ChromaDB returns the nearest ticket vectors.
+5. SQLite hydrates the public fields for the returned ticket IDs.
+6. The reranker keeps the requested evidence limit.
+7. The summarizer identifies recurring categories, likely resolutions, priority, and status from the retrieved evidence.
+8. The response includes the summary, evidence IDs, confidence, and retrieval strategy.
+
+CLI form:
+
+```bash
+python -m forge.cli ask "Summarize login issues"
+```
+
+Machine-readable form:
+
+```bash
+python -m forge.cli ask "Summarize login issues" --json
+```
+
+The API form:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/ask \
@@ -653,13 +395,78 @@ curl -X POST http://127.0.0.1:8000/ask \
   -d '{"question":"Summarize login issues","max_evidence":5}'
 ```
 
-The response includes the grounded answer, retrieval strategy, evidence ticket IDs, confidence, and per-stage timings.
+## Application screens
+
+### Dashboard
+
+The dashboard is the main investigation workspace. It accepts a question, sends it to the API, and presents the answer, confidence, retrieval strategy, reasoning provider, evidence, and timings.
+
+### Evidence cards
+
+Each evidence card identifies a ticket, displays its score and summary, and can be expanded to inspect more detail. This makes the source records visible alongside the generated response.
+
+### Settings
+
+Settings displays the active backend URL and API-reported model and collection information. It is intended for checking what system the dashboard is connected to.
+
+### About
+
+About explains Forge’s architecture, features, and technology choices for users who want context before running an investigation.
+
+### Health and performance panels
+
+The dashboard shows backend health, retrieval subsystem status, collection size, and stage timings. Loading, retry, error, and unavailable-backend states are represented in the UI.
+
+## AI pipeline
+
+### 1. Ingestion and normalization
+
+CSV rows and GitHub Issues are converted into the same normalized ticket schema. GitHub pull requests are ignored. The shared ingestion path writes metadata to SQLite and computes freshness hashes.
+
+### 2. Embedding generation
+
+The default local Sentence Transformers service loads `BAAI/bge-base-en-v1.5` once per process. It generates normalized document vectors for indexing and query vectors for retrieval. The same cached service is reused by ingestion, retrieval, and evaluation.
+
+### 3. Vector search
+
+ChromaDB stores the retrieval document, embedding, and small metadata for each embedded ticket. A semantic query asks for the nearest top-k vectors rather than loading the full collection.
+
+### 4. SQL lookup
+
+SQLite remains the source of truth for exact fields and analytics. It supports counts, group-by operations, trends, and safe filtering through allowlisted fields and parameterized values.
+
+### 5. Context assembly
+
+Retrieved Chroma IDs are joined back to public SQLite ticket fields. The answer context therefore includes the evidence records that the user can inspect.
+
+### 6. LLM reasoning
+
+When configured, OpenAI is used for the tool-calling and reasoning path. The local embedding model remains independent from this step. The deterministic planner and tools provide an inspectable path and fallback behavior.
+
+### 7. Grounded answer generation
+
+The final response is limited to structured results or retrieved evidence. Unsupported questions return a refusal rather than a fabricated answer.
+
+## Explainability and grounding
+
+Forge makes the investigation path visible in several ways:
+
+- **Evidence:** Responses include source ticket IDs and the fields used to summarize them.
+- **Confidence:** The score communicates the strength of the available evidence and is not presented as certainty.
+- **Reasoning:** The plan and tool sequence show whether Forge used SQL, semantic retrieval, summarization, or a report chain.
+- **Retrieval strategy:** Runtime notes distinguish Chroma semantic retrieval from SQLite fallback retrieval.
+- **Timings:** The API and profiling logs expose where time was spent.
+- **Unsupported questions:** A question such as `Who is the CEO?` does not belong to the indexed support-ticket domain, so Forge returns:
+
+  ```text
+  No supporting evidence found in indexed data.
+  ```
+
+Composite claims are also guarded. If a query asks for a refund count conditioned on an unsupported cause, Forge must not return the count as though the full condition were proven.
 
 ## CLI reference
 
-### `profile`
-
-Profile a CSV without ingesting it:
+### Profile a CSV
 
 ```bash
 python -m forge.cli profile \
@@ -667,186 +474,255 @@ python -m forge.cli profile \
   --output outputs/profile.json
 ```
 
-The profile counts rows, columns, duplicate ticket IDs, missing fields, unique text values, date range, and the known PII fields. This command is implemented for CSV input.
+Profiles count rows and columns, inspect duplicates and missing fields, summarize unique values, and report date information without ingesting records.
 
-### `ingest`
-
-Ingest a CSV:
+### Ingest
 
 ```bash
-python -m forge.cli ingest \
-  --source /path/to/customer_support_tickets.csv \
-  --db data/forge.db
+python -m forge.cli ingest --source /path/to/customer_support_tickets.csv
+python -m forge.cli ingest --source github --repo owner/repository
 ```
 
-Ingest GitHub Issues:
+Use `--embed` to embed current-run candidates. If there are no new or retrieval-changed records, Forge reports that no new records require embedding.
 
-```bash
-python -m forge.cli ingest \
-  --source github \
-  --repo owner/repository \
-  --db data/forge.db
-```
-
-Add `--embed` to embed only current-run candidates. The command supports `--source github:owner/repository` internally as an alternate source string, although the documented form is `--source github --repo owner/repository`.
-
-### `ask`
+### Ask
 
 ```bash
 python -m forge.cli ask "Why are users unhappy?"
 python -m forge.cli ask "What are the top complaint categories?" --json
 ```
 
-Default output is for people. `--json` preserves machine-readable fields including `answer`, `evidence`, `source_ticket_ids`, `confidence`, `tool_calls`, and the plan when the deterministic path is used.
+Human-readable output is the default. `--json` returns the machine-readable payload.
 
-### `status`
+### Status
 
 ```bash
 python -m forge.cli status
 python -m forge.cli status --json
 ```
 
-The status screen reports SQLite, ChromaDB, total records, embedded records, pending records, embedding mode, last ingestion time, embedding failures, and freshness. A pending count can be intentional when a development embedding limit is configured.
+Status reports record counts, embedded and pending records, storage engines, embedding mode, last ingestion, failures, and freshness.
 
-### `tools`
+### Tools
 
 ```bash
 python -m forge.cli tools
 ```
 
-Print the registered tool names.
+Prints the registered tool names.
 
-### `run report`
-
-Generate a weekly Markdown summary:
+### Weekly report
 
 ```bash
 python -m forge.cli run report \
   --type weekly-summary \
   --start 2024-12-25 \
-  --end 2024-12-31 \
-  --db data/forge.db
+  --end 2024-12-31
 ```
 
-Without explicit dates, Forge derives a seven-day range ending at the latest `ticket_created_date` in SQLite. The report contains ticket count, top five categories, priority distribution, SLA-breach distribution, and a note that customer names/emails are excluded.
+The report writes Markdown containing ticket totals, top categories, priority distribution, SLA-breach distribution, and a note excluding customer identity fields.
 
-## Data model and storage
+## HTTP API
 
-### SQLite
+The FastAPI service wraps the existing engine and does not duplicate its planner, retrieval, SQL, embedding, or reasoning logic.
 
-The `tickets` table stores the normalized source fields plus:
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Reports API version, embedding settings, LLM provider, and semantic readiness. |
+| `POST` | `/ask` | Runs an investigation and returns a typed grounded response. |
+| `POST` | `/health/retrieval` | Checks SQLite, Chroma, embedding readiness, collection size, and latency. |
+| `GET` | `/stats` | Reports ticket counts, embedding model, vector dimension, and Chroma count. |
+| `GET` | `/docs` | Swagger UI. |
+| `GET` | `/redoc` | ReDoc API documentation. |
 
-- `record_hash`;
-- `retrieval_hash`;
-- `embedding_status`; and
-- `ingested_at`.
+Example request:
 
-The `ingest_runs` table stores source, timestamps, loaded/new/changed/skipped counts, embedding candidates, and error counts. `init_db` creates indexes for creation date, category, and retrieval hash and adds `updated_date` to older databases when needed.
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How many payment issues occurred?","max_evidence":5}'
+```
 
-### ChromaDB
+The response includes `question`, `answer`, `confidence`, `retrieval_strategy`, `reasoning_provider`, `evidence`, and `timings`. Evidence-explanation follow-ups may include an `investigation_context` containing the previous retrieval strategy and evidence list.
 
-`ChromaStore` opens a persistent ChromaDB client and the `forge_tickets` collection. Each upsert contains:
+## Incremental ingestion and freshness
 
-- `ticket_id` as the Chroma ID;
-- the redacted retrieval document;
-- the locally generated BGE embedding; and
-- category, product, and priority metadata.
+Forge uses two hashes so metadata changes do not automatically trigger expensive embedding work.
 
-SQLite remains the source of truth for returned ticket fields and exact analytics.
+| Change | SQLite behavior | Embedding behavior |
+| --- | --- | --- |
+| New ticket | Insert as pending | Embed when `--embed` is used |
+| No change | Skip | Do nothing |
+| Metadata-only change | Update metadata | Preserve existing embedding status |
+| Retrieval-content change | Update metadata and mark pending | Re-embed when `--embed` is used |
+
+`record_hash` covers the normalized record. `retrieval_hash` covers the fields used to construct the redacted retrieval document. The ingestion result carries the IDs that need embedding, so current-run embedding does not accidentally process the entire backlog. The `embed_pending()` function remains available for deliberate backlog processing.
+
+## GitHub Issues ingestion
+
+Forge uses the GitHub REST API and follows pagination automatically. Public repositories do not require authentication. Pull requests are ignored because GitHub exposes them through the Issues endpoint with a `pull_request` field.
+
+The normalized mapping is:
+
+| GitHub value | Forge field |
+| --- | --- |
+| Issue ID, with issue number fallback | `ticket_id` |
+| First label or `Uncategorized` | `category` |
+| Title plus body | `issue_description` |
+| State plus closing comment when available | `resolution_notes` |
+| Recognized priority label | `priority` |
+| Issue state | `status` |
+| Constant `GitHub` | `channel` |
+| Repository name | `product` |
+| Constant `Unknown` | `region` |
+| GitHub creation timestamp | `ticket_created_date` |
+| GitHub update timestamp | `updated_date` |
+
+GitHub HTTP responses are mocked in tests; production ingestion always calls the real GitHub REST API.
+
+## Evaluation
+
+The evaluation framework lives in `eval/` and processes cases one at a time to keep memory bounded.
+
+Run it with an existing SQLite database:
+
+```bash
+python eval/run_eval.py --db data/forge.db
+```
+
+The dataset contains approximately 50 representative questions across structured analytics, semantic search, summaries, anomaly-oriented questions, and unsupported questions.
+
+The report measures:
+
+| Metric | Meaning |
+| --- | --- |
+| Retrieval Recall@5 | How much of the gold evidence appears in the first five retrieved results. |
+| Retrieval Precision@5 | How many of the first five retrieved results are in the relevant gold set. |
+| Planner Accuracy | How often the deterministic tool chain matches the expected tool chain. |
+| Structured Query Accuracy | Whether the structured operation and field match the expected query. |
+| Grounded Responses | The share of responses classified as grounded by the evaluator. |
+| Hallucination Rate | The share of cases with unsupported claims, missing refusals, or evaluation errors. |
+| Average Response Latency | Average case execution time in milliseconds. |
+
+The evaluator reuses shared local resources, retrieves bounded top-k evidence, avoids loading the full Chroma collection, and closes its SQLite connection.
 
 ## Testing
 
-Run the complete local suite:
+Run the full Python suite:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest -q
 ```
 
-The tests cover:
+The current suite contains 46 passing tests covering:
 
-- deterministic planner routing and top-N intent;
-- human CLI rendering and status rendering;
-- `.env`/OpenAI configuration errors;
-- incremental CSV and GitHub ingestion;
-- hash reuse and embedding scope;
-- GitHub pagination, mapping, pull-request filtering, and error results;
-- query expansion and evidence-aware summaries;
-- SQLite validation and PII-safe structured fields; and
-- evaluation metrics, dataset coverage, bounded answerer resources, and report formatting.
+- planner routing, comparison queries, composite claims, and top-N intent;
+- SQLite schema and structured analytics;
+- CSV and GitHub ingestion, pagination, mapping, filtering, and hash reuse;
+- targeted embedding and backlog embedding behavior;
+- query expansion, retrieval fallback, summaries, confidence, and grounding;
+- FastAPI request validation, health, statistics, and investigation context;
+- bootstrap behavior for local and downloaded runtime artifacts; and
+- evaluation metrics, bounded resources, and report formatting.
 
-GitHub tests mock HTTP responses. They do not call the live GitHub API. Embedding tests use fake embedding/Chroma objects. Production ingestion does not use those fixtures.
+GitHub tests mock HTTP responses and do not depend on live network access. Production ingestion does not use mock data.
 
-## Technical decisions and trade-offs
+For the frontend:
 
-### SQLite for metadata and analytics
+```bash
+cd frontend
+npm run build
+```
 
-SQLite is embedded, portable, transactional, and sufficient for exact counts and allowlisted filters over a local support dataset. The trade-off is that it is not a distributed analytics warehouse and does not provide a server-managed multi-user deployment model.
+The frontend uses Next.js 15, React 19, TypeScript, Tailwind CSS, Framer Motion, Lucide icons, and TanStack Query.
 
-### ChromaDB for vectors
+## Technical decisions
 
-ChromaDB provides a local persistent vector collection with a small integration surface. Keeping it beside SQLite makes the storage boundary explicit: SQLite owns metadata; ChromaDB owns vector retrieval. The trade-off is another local storage engine and a dependency heavier than the lexical fallback.
+### Why SQLite?
 
-### RAG instead of free-form generation
+SQLite is portable, transactional, easy to inspect, and sufficient for exact counts and allowlisted filters over a local support dataset. The trade-off is that it is not a distributed multi-user analytics warehouse.
 
-Support answers need evidence and ticket IDs. Retrieval limits the answer context to indexed tickets and enables a refusal when nothing supports the question. The trade-off is that answers are limited to the indexed data and can miss relevant tickets when embeddings, vocabulary, or source coverage are weak.
+### Why ChromaDB?
 
-### Two hashes instead of one
+ChromaDB provides persistent local vector search with a small integration surface. SQLite remains authoritative for metadata while ChromaDB is responsible for vector lookup. The trade-off is an additional local storage engine.
 
-A single freshness hash would force metadata-only edits to re-embed. Separating complete-record freshness from retrieval-content freshness reduces embedding cost while retaining metadata updates. The trade-off is that the retrieval field list must be maintained when retrieval-document construction changes.
+### Why local embeddings?
 
-### Deterministic planner plus optional OpenAI tools
+Local Sentence Transformers embeddings remove per-document embedding API charges and allow the same model to be reused for ingestion, retrieval, and evaluation. The trade-off is the local model download and the CPU/GPU memory required to run it.
 
-The deterministic planner makes routing testable and provides a local fallback. OpenAI tool calling can handle more flexible multi-step orchestration when configured. The trade-off is two execution behaviors to test and the requirement for an OpenAI key before `ask` is attempted.
+### Why use RAG?
 
-### Lightweight query expansion
+Retrieval-augmented generation gives the answer a bounded evidence context and exposes the records behind a conclusion. The trade-off is that answers are limited by indexed data quality, source coverage, and retrieval quality.
 
-A configurable synonym map improves recall without changing the embedding model, vector store, or ingestion format. The trade-off is broader queries and possible retrieval noise; mappings should be extended only with domain evidence and regression tests.
+### Why two freshness hashes?
 
-### No automatic deletion reconciliation
+A complete-record hash detects any metadata change, while a retrieval hash detects only changes that affect semantic search. This avoids unnecessary re-embedding when metadata changes without changing retrieval content.
 
-Ingestion upserts records received from a source but does not delete SQLite records that disappear from a later CSV or GitHub response. This avoids destructive synchronization by default, but it means a source removal is not represented automatically.
+### Why a planner?
+
+Support questions are not all the same. A planner makes the choice between SQL, semantic retrieval, summaries, and reports explicit and testable. The trade-off is that intent rules require regression tests as new question patterns appear.
+
+### Why query expansion?
+
+Users do not always use the vocabulary present in the source data. Additive expansion connects terms such as authentication, sign in, credentials, payment, billing, and refund without replacing the original query or changing the embedding model. The trade-off is possible retrieval noise when a synonym map is too broad.
 
 ## Future improvements
 
-These are intentionally scoped follow-ups, not current features:
+These are realistic follow-ups, not claims about current functionality:
 
-- add explicit anomaly intent routing and a real time-series spike detector;
-- correct and expand evaluation gold-set handling, then add a CI quality gate;
-- add source-aware deletion or archival reconciliation with an explicit opt-in;
-- reuse OpenAI and Chroma clients in the main retrieval path to reduce per-query initialization;
-- add a committed license and continuous-integration workflow; and
-- add larger-scale operational controls for rate limits, retries, and multi-user deployments.
+- authenticated multi-user access;
+- persisted conversation history and investigation sessions;
+- true streaming responses;
+- stronger hybrid semantic-plus-lexical ranking;
+- learned reranking for larger corpora;
+- explicit anomaly intent routing and time-series spike detection;
+- stronger evaluation gold-set handling and CI quality gates; and
+- source-aware deletion or archival reconciliation.
 
 ## Contributing
 
-1. Create a focused branch from the current project state.
-2. Keep changes incremental and preserve the shared ingestion, SQLite, and Chroma boundaries.
-3. Add or update tests for routing, ingestion, retrieval, or CLI behavior.
-4. Run:
+1. Create a focused branch from `main`.
+2. Preserve the shared ingestion, SQLite, ChromaDB, planner, and API boundaries.
+3. Add regression tests for behavior changes.
+4. Run the Python suite and frontend build locally:
 
    ```bash
-   python -m unittest discover -s tests -v
-   git diff --check
+   python -m pytest -q
+   cd frontend && npm run build
    ```
 
-5. Do not commit `.env`, API keys, SQLite databases, Chroma data, generated logs, reports, or profile output.
-6. In a pull request, describe the behavior change, test evidence, and any data or cost trade-off.
+5. Run `git diff --check` before opening a pull request.
+6. Do not commit `.env`, API keys, SQLite databases, Chroma data, generated logs, reports, or profile output.
+7. Describe the behavior change, validation evidence, and relevant retrieval or cost trade-offs in the pull request.
 
 ## License
 
-No `LICENSE` file is currently included in this repository. Add an explicit license before distributing Forge or accepting external contributions under defined terms.
+The repository does not currently include a committed `LICENSE` file. The intended license text is the MIT License below; add it as `LICENSE` before distributing Forge under those terms:
+
+```text
+MIT License
+
+Copyright (c) 2026 Forge contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## Acknowledgements
 
-Forge uses and integrates with:
-
-- Python and the Python standard library;
-- SQLite;
-- local Hugging Face Sentence Transformers embeddings;
-- OpenAI chat completions for reasoning and answer generation;
-- ChromaDB;
-- Typer;
-- `python-dotenv`; and
-- the GitHub REST API.
-
-These dependencies are used as implementation components; Forge is not affiliated with their maintainers.
+Forge builds on the Python, FastAPI, SQLite, ChromaDB, Sentence Transformers, Hugging Face, OpenAI, Next.js, React, Tailwind CSS, TanStack Query, and Framer Motion ecosystems.
