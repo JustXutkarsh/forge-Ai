@@ -588,12 +588,44 @@ Never commit `.env`. It is ignored by `.gitignore`.
 | `EMBEDDING_PROVIDER` | No | `huggingface` | Local embedding provider. |
 | `EMBEDDING_MODEL` | No | `BAAI/bge-base-en-v1.5` | Local Sentence Transformers model. |
 | `FORGE_DB` | No | `data/forge.db` | SQLite database path. |
-| `FORGE_CHROMA` | No | `data/chroma` | Persistent ChromaDB path. |
+| `FORGE_CHROMA` | No | `data/chroma.rebuilt` | Persistent ChromaDB path. |
 | `FORGE_OUTPUTS` | No | `outputs` | Log and report root directory. |
 | `FORGE_EMBED_LIMIT` | No | `0` | Status context for an intentional development embedding limit. |
 | `FORGE_MODEL` | No | `gpt-4o` | OpenAI chat-completions model. |
+| `FORGE_DB_URL` | Render only when `data/forge.db` is absent | none | HTTPS URL for the SQLite artifact downloaded at API startup. |
+| `FORGE_CHROMA_URL` | Render only when `data/chroma.rebuilt` is absent | none | HTTPS URL for the Chroma ZIP artifact downloaded at API startup. |
 
 Forge loads `.env` from the project root through `python-dotenv` when `forge.config` is imported. If `OPENAI_API_KEY` is missing, commands that require OpenAI print setup instructions instead of a Python traceback. The local embedding model is downloaded from Hugging Face on first use; subsequent runs use the local cache.
+
+## Render deployment
+
+Forge keeps the SQLite database and Chroma files out of Git because they are large and generated data artifacts. The FastAPI startup sequence downloads them only when they are missing locally, so local development is unchanged when `data/forge.db` and `data/chroma.rebuilt` already exist.
+
+1. Upload `data/forge.db` and the contents of `data/chroma.rebuilt` to durable HTTPS object storage. Create the Chroma archive from the directory contents so that `chroma.sqlite3` is at the archive root:
+
+   ```bash
+   cd data/chroma.rebuilt
+   zip -r ../chroma.zip .
+   ```
+
+2. Create a Render Web Service from this repository. Use Python 3.11 or newer, and configure:
+
+   ```text
+   Build Command: pip install -r requirements.txt
+   Start Command: uvicorn forge.api.app:app --host 0.0.0.0 --port $PORT
+   ```
+
+3. Add these environment variables in Render. Keep the artifact URLs private or use signed URLs when the data must not be public:
+
+   ```text
+   OPENAI_API_KEY=...
+   FORGE_DB_URL=https://storage.example.com/forge.db
+   FORGE_CHROMA_URL=https://storage.example.com/chroma.zip
+   ```
+
+   `GITHUB_TOKEN` remains optional. `FORGE_DB_URL` and `FORGE_CHROMA_URL` are required only when their corresponding local artifacts are missing.
+
+At startup Forge streams each download to disk, retries failures up to three times, extracts Chroma into `data/chroma.rebuilt`, removes the temporary ZIP, and only then initializes SQLite and Chroma. A failed download stops application startup with a clear error instead of starting an unusable service. Render Free has ephemeral local storage, so the artifacts may be downloaded again after a service restart or redeploy.
 
 ## HTTP API
 

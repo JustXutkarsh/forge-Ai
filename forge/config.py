@@ -31,7 +31,7 @@ def require_openai_api_key() -> str:
 
 
 DB_PATH = Path(os.getenv("FORGE_DB", "data/forge.db"))
-CHROMA_PATH = Path(os.getenv("FORGE_CHROMA", "data/chroma"))
+CHROMA_PATH = Path(os.getenv("FORGE_CHROMA", "data/chroma.rebuilt"))
 OUTPUTS = Path(os.getenv("FORGE_OUTPUTS", "outputs"))
 EMBED_LIMIT = int(os.getenv("FORGE_EMBED_LIMIT", "0") or 0)
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "huggingface").strip().lower()

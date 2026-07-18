@@ -7,6 +7,7 @@ __pycache__/
 data/*.db
 data/chroma/
 data/chroma*/
+data/*.zip
 outputs/logs/
 outputs/reports/
 outputs/profile.json
