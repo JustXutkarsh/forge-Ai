@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -36,7 +37,7 @@ class AgentPlan:
 TOOL_NAMES = ("search_data", "query_structured", "summarize", "draft_report", "flag_anomaly")
 TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "search_data", "description": "Use ONLY for semantic lookup, explanations, and finding related support tickets. Do not use for exact counts or group-by results.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "k": {"type": "integer", "default": 5}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "query_structured", "description": "Use ONLY for exact counts, aggregations, trends, group-bys, and allowlisted filters over SQLite metadata. Never use semantic similarity for these questions.", "parameters": {"type": "object", "properties": {"operation": {"type": "string", "enum": ["count", "group_by", "trend_over_time", "filter"]}, "field": {"type": "string"}, "filters": {"type": ["object", "null"]}, "date_range": {"type": ["array", "null"]}}, "required": ["operation", "field"]}}},
+    {"type": "function", "function": {"name": "query_structured", "description": "Use ONLY for exact counts, aggregations, trends, group-bys, and allowlisted filters over SQLite metadata. Never use semantic similarity for these questions. Use limit for explicit top-N requests.", "parameters": {"type": "object", "properties": {"operation": {"type": "string", "enum": ["count", "group_by", "trend_over_time", "filter"]}, "field": {"type": "string"}, "filters": {"type": ["object", "null"]}, "date_range": {"type": ["array", "null"]}, "limit": {"type": ["integer", "null"]}}, "required": ["operation", "field"]}}},
     {"type": "function", "function": {"name": "summarize", "description": "Use ONLY after search_data returns tickets. Summarize only the supplied evidence and do not add facts.", "parameters": {"type": "object", "properties": {"tickets": {"type": "array"}}, "required": ["tickets"]}}},
     {"type": "function", "function": {"name": "draft_report", "description": "Use ONLY after structured analytics and retrieval/summarization have completed. Draft a cited report from those results.", "parameters": {"type": "object", "properties": {"topic": {"type": "string"}, "timeframe": {"type": "string"}}, "required": ["topic", "timeframe"]}}},
     {"type": "function", "function": {"name": "flag_anomaly", "description": "Use ONLY to detect unusual spikes or patterns in a selected period; do not use it for ordinary counts.", "parameters": {"type": "object", "properties": {"date_range": {"type": ["array", "null"]}}}}},
@@ -58,6 +59,18 @@ _CATEGORY_SYNONYMS = {
     "bugs": "Bug Report",
 }
 
+_TOP_METADATA_TERMS = (
+    "label", "labels", "category", "categories", "priority", "priorities",
+    "product", "products", "region", "regions", "channel", "channels",
+    "status", "statuses", "distribution", "breakdown",
+)
+_TOP_ISSUE_TERMS = (
+    "issue", "issues", "problem", "problems", "bug", "bugs", "failure",
+    "failures", "crash", "crashes", "authentication", "login", "sign in",
+    "signin", "credential", "credentials", "payment", "billing", "refund",
+    "performance", "slow", "lag", "freeze", "recurring",
+)
+
 
 def _category_filter(question: str) -> dict[str, str] | None:
     lowered = question.lower()
@@ -70,9 +83,17 @@ def _category_filter(question: str) -> dict[str, str] | None:
 def _structured_step(question: str) -> PlanStep | None:
     lowered = question.lower()
     filters = _category_filter(question)
-    if any(word in lowered for word in ("top", "most common", "breakdown", "distribution")):
+    top_match = re.search(r"\btop\s+(\d+)\b", lowered)
+    limit = int(top_match.group(1)) if top_match else None
+    top_request = any(word in lowered for word in ("top", "most common", "breakdown", "distribution"))
+    metadata_top_request = any(term in lowered for term in _TOP_METADATA_TERMS)
+    issue_top_request = any(term in lowered for term in _TOP_ISSUE_TERMS)
+    if top_request and metadata_top_request and not issue_top_request:
         field = "product" if "product" in lowered else "region" if "region" in lowered else "priority" if "priority" in lowered else "category"
-        return PlanStep("query_structured", {"operation": "group_by", "field": field, "filters": filters})
+        arguments = {"operation": "group_by", "field": field, "filters": filters}
+        if limit is not None:
+            arguments["limit"] = limit
+        return PlanStep("query_structured", arguments)
     if any(word in lowered for word in ("trend", "over time", "monthly", "by month")):
         return PlanStep("query_structured", {"operation": "trend_over_time", "field": "ticket_created_date", "filters": filters})
     if any(word in lowered for word in ("how many", "count", "number of", "rate", "percentage")):
@@ -110,7 +131,7 @@ def _dispatch(conn: sqlite3.Connection, name: str, arguments: dict[str, Any], co
         return search_data(conn, arguments["query"], int(arguments.get("k", 5)))
     if name == "query_structured":
         date_range = tuple(arguments["date_range"]) if arguments.get("date_range") else None
-        return query_structured(conn, arguments["operation"], arguments["field"], arguments.get("filters"), date_range)
+        return query_structured(conn, arguments["operation"], arguments["field"], arguments.get("filters"), date_range, arguments.get("limit"))
     if name == "summarize":
         if "search_data" not in completed:
             return {"error": "summarize requires search_data to run first"}
@@ -144,6 +165,7 @@ def run_openai_agent(conn: sqlite3.Connection, question: str) -> dict[str, Any] 
     retrieved_ticket_ids: list[str] = []
     ticket_evidence: list[dict[str, Any]] = []
     structured_evidence: list[dict[str, Any]] = []
+    evidence_confidence = 0.0
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     for _ in range(5):
         response = client.chat.completions.create(model=os.getenv("FORGE_MODEL", "gpt-4o"), temperature=0.1, messages=messages, tools=TOOL_SCHEMAS, tool_choice="auto")
@@ -159,7 +181,7 @@ def run_openai_agent(conn: sqlite3.Connection, question: str) -> dict[str, Any] 
             answer = message.content or "No supporting evidence found in indexed data."
             if not has_evidence:
                 answer = "No supporting evidence found in indexed data."
-            return {"answer": answer, "evidence": {"tickets": ticket_evidence, "structured": structured_evidence}, "tool_calls": calls, "sources": [call["name"] for call in calls], "source_ticket_ids": retrieved_ticket_ids, "confidence": 1.0 if has_evidence else 0.0, "token_usage": token_usage}
+            return {"answer": answer, "evidence": {"tickets": ticket_evidence, "structured": structured_evidence}, "tool_calls": calls, "sources": [call["name"] for call in calls], "source_ticket_ids": retrieved_ticket_ids, "confidence": evidence_confidence if has_evidence else 0.0, "token_usage": token_usage}
         messages.append(message.model_dump(exclude_none=True))
         for tool_call in message.tool_calls:
             arguments = json.loads(tool_call.function.arguments or "{}")
@@ -167,9 +189,11 @@ def run_openai_agent(conn: sqlite3.Connection, question: str) -> dict[str, Any] 
             calls.append({"name": tool_call.function.name, "arguments": arguments})
             completed.add(tool_call.function.name)
             if isinstance(result, dict):
+                evidence_confidence = max(evidence_confidence, float(result.get("confidence", 0.0)))
                 retrieved_ticket_ids.extend(result.get("source_ticket_ids", []))
                 ticket_evidence.extend(result.get("tickets", []))
                 if result.get("operation"):
+                    evidence_confidence = max(evidence_confidence, 1.0 if result["operation"] == "filter" else 0.95)
                     structured_evidence.append(result)
             messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result, default=str)})
-    return {"answer": "The agent exceeded its tool-call limit.", "evidence": {"tickets": ticket_evidence, "structured": structured_evidence}, "tool_calls": calls, "sources": [call["name"] for call in calls], "source_ticket_ids": retrieved_ticket_ids, "confidence": 1.0 if retrieved_ticket_ids or structured_evidence else 0.0, "token_usage": token_usage}
+    return {"answer": "The agent exceeded its tool-call limit.", "evidence": {"tickets": ticket_evidence, "structured": structured_evidence}, "tool_calls": calls, "sources": [call["name"] for call in calls], "source_ticket_ids": retrieved_ticket_ids, "confidence": evidence_confidence if retrieved_ticket_ids or structured_evidence else 0.0, "token_usage": token_usage}

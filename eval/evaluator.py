@@ -19,6 +19,7 @@ from forge.config import CHROMA_PATH
 from forge.rag.rerank import rerank
 from forge.rag.retrieve import PUBLIC_FIELDS, STOPWORDS
 from forge.rag.vectorstore import ChromaStore
+from forge.search.query_normalizer import expand_query
 
 from eval.metrics import (
     average_latency,
@@ -136,13 +137,14 @@ class EvaluationAnswerer:
 
     def _search_data(self, conn: sqlite3.Connection, query: str, k: int = 5) -> dict[str, Any]:
         """Mirror the existing search contract with shared retrieval resources."""
-        tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+        retrieval_query = expand_query(query)
+        tokens = set(re.findall(r"[a-z0-9]+", retrieval_query.lower()))
         if not tokens.intersection(SUPPORTED_QUERY_TERMS):
             return {"query": query, "tickets": [], "source_ticket_ids": [], "confidence": 0.0, "evidence_status": "unsupported_domain"}
-        tickets = self._semantic_retrieve(conn, query, max(k, 20))
+        tickets = self._semantic_retrieve(conn, retrieval_query, max(k, 20))
         if tickets is None:
-            tickets = self._lexical_retrieve(conn, query, max(k, 20))
-        tickets = rerank(query, tickets, k)
+            tickets = self._lexical_retrieve(conn, retrieval_query, max(k, 20))
+        tickets = rerank(retrieval_query, tickets, k)
         distances = [float(ticket.pop("_retrieval_distance")) for ticket in tickets if "_retrieval_distance" in ticket]
         scores = [float(ticket.pop("_score")) for ticket in tickets if "_score" in ticket]
         confidence = max(0.0, min(1.0, 1.0 - min(distances))) if distances else max(0.0, min(1.0, max(scores) / 2.0)) if scores else 0.0
@@ -167,7 +169,7 @@ class EvaluationAnswerer:
             tool_calls.append(step.tool)
             if step.tool == "query_structured":
                 args = step.arguments
-                results[index] = query_structured(conn, args["operation"], args["field"], args.get("filters"), args.get("date_range"))
+                results[index] = query_structured(conn, args["operation"], args["field"], args.get("filters"), args.get("date_range"), args.get("limit"))
             elif step.tool == "search_data":
                 result = self._search_data(conn, step.arguments["query"], step.arguments.get("k", 5))
                 results[index] = result

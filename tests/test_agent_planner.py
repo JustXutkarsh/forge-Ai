@@ -1,6 +1,9 @@
 import unittest
+import sqlite3
 
+from forge.agent.executor import _execute_plan
 from forge.agent.planner import plan_question
+from forge.analytics.schema import init_db
 
 
 class PlannerRoutingTests(unittest.TestCase):
@@ -9,6 +12,24 @@ class PlannerRoutingTests(unittest.TestCase):
         self.assertEqual(plan.tool_names, ["query_structured"])
         self.assertEqual(plan.steps[0].arguments["operation"], "group_by")
         self.assertEqual(plan.steps[0].arguments["field"], "category")
+
+    def test_top_labels_uses_sql(self):
+        self.assertEqual(plan_question("top 5 labels").tool_names, ["query_structured"])
+
+    def test_top_authentication_issues_uses_rag(self):
+        self.assertEqual(plan_question("top 5 authentication issues").tool_names, ["search_data"])
+
+    def test_top_login_problems_uses_rag(self):
+        self.assertEqual(plan_question("top 5 login problems").tool_names, ["search_data"])
+
+    def test_structured_plan_has_confidence(self):
+        conn = sqlite3.connect(":memory:")
+        init_db(conn)
+        try:
+            output = _execute_plan(conn, plan_question("top 5 labels"))
+            self.assertGreater(output["confidence"], 0.0)
+        finally:
+            conn.close()
 
     def test_payment_issue_count_uses_category_filter(self):
         plan = plan_question("How many payment issues occurred?")

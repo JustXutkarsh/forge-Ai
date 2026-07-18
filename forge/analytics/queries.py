@@ -36,6 +36,7 @@ def query_structured(
     field: str,
     filters: dict[str, str] | None = None,
     date_range: tuple[str, str] | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     _validate(operation, field, filters)
     # Identifiers come only from the allowlist; values are always bound parameters.
@@ -48,16 +49,17 @@ def query_structured(
         where.append("ticket_created_date BETWEEN ? AND ?")
         params.extend(date_range)
     clause = f" WHERE {' AND '.join(where)}" if where else ""
+    result_limit = max(1, min(int(limit or 100), 1000))
 
     if operation == "count":
         row = conn.execute(f"SELECT COUNT(*) AS count FROM tickets{clause}", params).fetchone()
         return {"operation": operation, "field": field, "count": row[0]}
     if operation == "group_by":
-        rows = conn.execute(f"SELECT {identifier} AS value, COUNT(*) AS count FROM tickets{clause} GROUP BY {identifier} ORDER BY count DESC, value LIMIT 100", params).fetchall()
+        rows = conn.execute(f"SELECT {identifier} AS value, COUNT(*) AS count FROM tickets{clause} GROUP BY {identifier} ORDER BY count DESC, value LIMIT ?", params + [result_limit]).fetchall()
         return {"operation": operation, "field": field, "results": [dict(r) for r in rows]}
     if operation == "trend_over_time":
         rows = conn.execute(f"SELECT substr(ticket_created_date, 1, 7) AS period, COUNT(*) AS count FROM tickets{clause} GROUP BY period ORDER BY period", params).fetchall()
         return {"operation": operation, "field": field, "results": [dict(r) for r in rows]}
     columns = ", ".join(SAFE_RESULT_FIELDS)
-    rows = conn.execute(f"SELECT {columns} FROM tickets{clause} ORDER BY ticket_created_date DESC LIMIT 100", params).fetchall()
+    rows = conn.execute(f"SELECT {columns} FROM tickets{clause} ORDER BY ticket_created_date DESC LIMIT ?", params + [result_limit]).fetchall()
     return {"operation": operation, "field": field, "results": [dict(r) for r in rows]}

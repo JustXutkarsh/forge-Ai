@@ -54,12 +54,14 @@ def _execute_plan(conn: sqlite3.Connection, plan: AgentPlan) -> dict[str, Any]:
     results: dict[int, dict[str, Any]] = {}
     retrieved: list[dict[str, Any]] = []
     retrieval_confidence = 0.0
+    structured_confidence = 0.0
     tool_calls: list[str] = []
     for index, step in enumerate(plan.steps):
         tool_calls.append(step.tool)
         if step.tool == "query_structured":
             args = step.arguments
-            results[index] = query_structured(conn, args["operation"], args["field"], args.get("filters"), args.get("date_range"))
+            results[index] = query_structured(conn, args["operation"], args["field"], args.get("filters"), args.get("date_range"), args.get("limit"))
+            structured_confidence = max(structured_confidence, 1.0 if args["operation"] == "filter" else 0.95)
         elif step.tool == "search_data":
             result = search_data(conn, step.arguments["query"], step.arguments.get("k", 5))
             results[index] = result
@@ -89,7 +91,7 @@ def _execute_plan(conn: sqlite3.Connection, plan: AgentPlan) -> dict[str, Any]:
         answer = summarize(retrieved) if retrieved else "No supporting evidence found in indexed data."
     source_ids = [ticket["ticket_id"] for ticket in retrieved]
     structured_evidence = results.get(0) if plan.steps and plan.steps[0].tool == "query_structured" else None
-    return {"answer": answer, "evidence": retrieved or structured_evidence, "source_ticket_ids": source_ids, "sources": source_ids or (["query_structured"] if structured_evidence else []), "confidence": retrieval_confidence, "tool_calls": tool_calls, "plan": plan.as_dict(), "tickets": retrieved, "structured": structured_evidence}
+    return {"answer": answer, "evidence": retrieved or structured_evidence, "source_ticket_ids": source_ids, "sources": source_ids or (["query_structured"] if structured_evidence else []), "confidence": max(retrieval_confidence, structured_confidence), "tool_calls": tool_calls, "plan": plan.as_dict(), "tickets": retrieved, "structured": structured_evidence}
 
 
 def latest_date_range(conn: sqlite3.Connection) -> tuple[str, str]:

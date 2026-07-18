@@ -4,6 +4,7 @@ import os
 
 from forge.config import CHROMA_PATH
 from forge.rag.vectorstore import ChromaStore
+from forge.search.query_normalizer import expand_query
 
 
 PUBLIC_FIELDS = ["ticket_id", "product", "category", "priority", "status", "channel", "region", "ticket_created_date", "issue_description", "resolution_notes"]
@@ -11,10 +12,11 @@ STOPWORDS = {"a", "an", "are", "be", "by", "did", "for", "how", "in", "is", "man
 
 
 def retrieve(conn: sqlite3.Connection, query: str, k: int = 5) -> list[dict]:
-    semantic = _semantic_retrieve(conn, query, k)
+    retrieval_query = expand_query(query)
+    semantic = _semantic_retrieve(conn, retrieval_query, k)
     if semantic is not None:
         return semantic
-    tokens = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if len(t) > 2 and t not in STOPWORDS][:8]
+    tokens = [t for t in re.findall(r"[a-z0-9]+", retrieval_query.lower()) if len(t) > 2 and t not in STOPWORDS][:8]
     columns = ", ".join(PUBLIC_FIELDS)
     if not tokens:
         rows = conn.execute(f"SELECT {columns} FROM tickets ORDER BY ticket_created_date DESC LIMIT ?", (k,)).fetchall()
