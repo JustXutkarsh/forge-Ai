@@ -10,7 +10,7 @@ TICKET_FIELDS = [
     "issue_description", "resolution_notes", "priority", "status", "channel",
     "region", "customer_age", "customer_gender", "subscription_type",
     "customer_tenure_months", "previous_tickets", "customer_satisfaction_score",
-    "first_response_time_hours", "resolution_time_hours", "ticket_created_date",
+    "first_response_time_hours", "resolution_time_hours", "ticket_created_date", "updated_date",
     "ticket_resolved_date", "escalated", "sla_breached", "operating_system",
     "browser", "payment_method", "language", "preferred_contact_time",
     "issue_complexity_score", "customer_segment",

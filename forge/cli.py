@@ -6,7 +6,7 @@ from pathlib import Path
 from forge.agent.executor import ask, weekly_report
 from forge.agent.planner import TOOL_NAMES
 from forge.analytics.schema import init_db
-from forge.config import DB_PATH, OUTPUTS, ensure_dirs
+from forge.config import DB_PATH, OUTPUTS, OpenAIConfigurationError, ensure_dirs
 from forge.config import EMBED_LIMIT
 from forge.pipeline.github import ingest_github
 from forge.pipeline.ingest import ingest_csv
@@ -63,10 +63,28 @@ def _render_status(payload: dict) -> str:
     ])
 
 
-def _ingest_source(source: str, db: str) -> dict:
+def _ingest_source(source: str, db: str, repo: str | None = None) -> dict:
+    if source == "github":
+        return ingest_github(repo or "", db)
     if source.startswith("github:"):
         return ingest_github(source.removeprefix("github:"), db)
     return ingest_csv(source, db)
+
+
+def _render_github_ingest(payload: dict) -> str:
+    """Render GitHub ingestion statistics for terminal users."""
+    if payload.get("error"):
+        return "\n".join(["GitHub ingestion failed", "", payload["error"], "", "-" * 50])
+    lines = [
+        "Fetching GitHub Issues...", "", "Repository", payload["source"].removeprefix("github:"), "",
+        "Issues downloaded", f"{payload.get('loaded', 0):,}", "", "New", str(payload.get("new", 0)), "",
+        "Updated", str(payload.get("changed", 0)), "", "Skipped", str(payload.get("skipped", 0)), "",
+        "Embedded", str(payload.get("embedded", 0)), "",
+    ]
+    if payload.get("embedding_message"):
+        lines.extend([payload["embedding_message"], ""])
+    lines.extend(["Done", "", "-" * 50])
+    return "\n".join(lines)
 
 
 def _conn(path: str | Path) -> sqlite3.Connection:
@@ -80,7 +98,7 @@ def _fallback(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="forge")
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("profile"); p.add_argument("--source", required=True); p.add_argument("--output", default="outputs/profile.json")
-    p = sub.add_parser("ingest"); p.add_argument("--source", required=True); p.add_argument("--db", default=str(DB_PATH)); p.add_argument("--embed", action="store_true")
+    p = sub.add_parser("ingest"); p.add_argument("--source", required=True); p.add_argument("--repo", default=None, help="GitHub owner/repository when --source github."); p.add_argument("--db", default=str(DB_PATH)); p.add_argument("--embed", action="store_true")
     p = sub.add_parser("ask", help="Ask a grounded support question."); p.add_argument("question"); p.add_argument("--db", default=str(DB_PATH)); p.add_argument("--json", action="store_true", help="Return the machine-readable JSON response.")
     p = sub.add_parser("status", help="Show pipeline and embedding health."); p.add_argument("--db", default=str(DB_PATH)); p.add_argument("--json", action="store_true", help="Return the machine-readable JSON response.")
     p = sub.add_parser("tools")
@@ -90,13 +108,24 @@ def _fallback(argv: list[str] | None = None) -> None:
     ensure_dirs()
     if args.command == "profile": print(json.dumps(write_profile(args.source, args.output), indent=2)); return
     if args.command == "ingest":
-        result = _ingest_source(args.source, args.db)
-        if args.embed:
-            from forge.rag.embed import embed_pending
-            result["embedded"] = embed_pending(args.db)
-        print(json.dumps(result, indent=2)); return
+        try:
+            result = _ingest_source(args.source, args.db, args.repo)
+            embedding_ids = result.pop("embedding_ticket_ids", [])
+            if args.embed:
+                if embedding_ids:
+                    from forge.rag.embed import embed_ticket_ids
+                    result["embedded"] = embed_ticket_ids(args.db, embedding_ids)
+                else:
+                    result["embedding_message"] = "No new records require embedding."
+        except OpenAIConfigurationError as exc:
+            print(str(exc)); return
+        print(_render_github_ingest(result) if args.source == "github" or args.source.startswith("github:") else json.dumps(result, indent=2)); return
     if args.command == "ask":
-        conn = _conn(args.db); payload = ask(conn, args.question); print(json.dumps(payload, indent=2, default=str) if args.json else _render_ask(args.question, payload)); conn.close(); return
+        try:
+            conn = _conn(args.db); payload = ask(conn, args.question); print(json.dumps(payload, indent=2, default=str) if args.json else _render_ask(args.question, payload)); conn.close()
+        except OpenAIConfigurationError as exc:
+            print(str(exc))
+        return
     if args.command == "tools": print("\n".join(TOOLS)); return
     if args.command == "status":
         conn = _conn(args.db)
@@ -120,19 +149,32 @@ def _typer_main() -> None:
         typer.echo(json.dumps(write_profile(source, output), indent=2))
 
     @app.command()
-    def ingest(source: str = typer.Option(..., "--source"), db: str = typer.Option(str(DB_PATH), "--db"), embed: bool = typer.Option(False, "--embed")):
+    def ingest(source: str = typer.Option(..., "--source", help="CSV path or github."), repo: str | None = typer.Option(None, "--repo", help="GitHub owner/repository when --source github."), db: str = typer.Option(str(DB_PATH), "--db"), embed: bool = typer.Option(False, "--embed")):
+        """Ingest CSV support tickets or GitHub Issues incrementally."""
         ensure_dirs()
-        result = _ingest_source(source, db)
-        if embed:
-            from forge.rag.embed import embed_pending
-            result["embedded"] = embed_pending(db)
-        typer.echo(json.dumps(result, indent=2))
+        try:
+            result = _ingest_source(source, db, repo)
+            embedding_ids = result.pop("embedding_ticket_ids", [])
+            if embed:
+                if embedding_ids:
+                    from forge.rag.embed import embed_ticket_ids
+                    result["embedded"] = embed_ticket_ids(db, embedding_ids)
+                else:
+                    result["embedding_message"] = "No new records require embedding."
+        except OpenAIConfigurationError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1)
+        typer.echo(_render_github_ingest(result) if source == "github" or source.startswith("github:") else json.dumps(result, indent=2))
 
     @app.command("ask")
     def ask_command(question: str, db: str = typer.Option(str(DB_PATH), "--db", help="SQLite database path."), json_output: bool = typer.Option(False, "--json", help="Return the machine-readable JSON response.")):
         """Ask a grounded support question."""
-        conn = _conn(db)
-        payload = ask(conn, question)
+        try:
+            conn = _conn(db)
+            payload = ask(conn, question)
+        except OpenAIConfigurationError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1)
         typer.echo(json.dumps(payload, indent=2, default=str) if json_output else _render_ask(question, payload))
         conn.close()
 

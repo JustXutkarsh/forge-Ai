@@ -10,7 +10,7 @@ TICKET_TYPES = {
     "region": "TEXT", "customer_age": "INTEGER", "customer_gender": "TEXT",
     "subscription_type": "TEXT", "customer_tenure_months": "INTEGER", "previous_tickets": "INTEGER",
     "customer_satisfaction_score": "REAL", "first_response_time_hours": "REAL",
-    "resolution_time_hours": "REAL", "ticket_created_date": "TEXT", "ticket_resolved_date": "TEXT",
+    "resolution_time_hours": "REAL", "ticket_created_date": "TEXT", "updated_date": "TEXT", "ticket_resolved_date": "TEXT",
     "escalated": "TEXT", "sla_breached": "TEXT", "operating_system": "TEXT", "browser": "TEXT",
     "payment_method": "TEXT", "language": "TEXT", "preferred_contact_time": "TEXT",
     "issue_complexity_score": "INTEGER", "customer_segment": "TEXT",
@@ -37,4 +37,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS idx_tickets_category ON tickets(category);
     CREATE INDEX IF NOT EXISTS idx_tickets_retrieval_hash ON tickets(retrieval_hash);
     """)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tickets)")}
+    if "updated_date" not in columns:
+        conn.execute("ALTER TABLE tickets ADD COLUMN updated_date TEXT NOT NULL DEFAULT ''")
     conn.commit()

@@ -19,7 +19,7 @@ def _ingest_rows(rows: Iterable[tuple[int, dict[str, Any]]], source: str, db_pat
     conn.row_factory = sqlite3.Row
     init_db(conn)
     started = _now()
-    stats = {"source": source, "loaded": 0, "new": 0, "changed": 0, "skipped": 0, "embedding_candidates": 0, "errors": 0}
+    stats = {"source": source, "loaded": 0, "new": 0, "changed": 0, "skipped": 0, "embedding_candidates": 0, "embedding_ticket_ids": [], "errors": 0}
     error_rows: list[dict[str, Any]] = []
     placeholders = ",".join("?" for _ in TICKET_FIELDS)
     update_fields = ",".join(f"{field} = excluded.{field}" for field in TICKET_FIELDS if field != "ticket_id")
@@ -36,6 +36,7 @@ def _ingest_rows(rows: Iterable[tuple[int, dict[str, Any]]], source: str, db_pat
             if old is None:
                 stats["new"] += 1
                 stats["embedding_candidates"] += 1
+                stats["embedding_ticket_ids"].append(row["ticket_id"])
                 embedding_status = "pending"
             elif old["record_hash"] == record_hash:
                 stats["skipped"] += 1
@@ -44,6 +45,7 @@ def _ingest_rows(rows: Iterable[tuple[int, dict[str, Any]]], source: str, db_pat
                 stats["changed"] += 1
                 if old["retrieval_hash"] != retrieval_hash:
                     stats["embedding_candidates"] += 1
+                    stats["embedding_ticket_ids"].append(row["ticket_id"])
                     embedding_status = "pending"
                 else:
                     embedding_status = old["embedding_status"]
@@ -57,9 +59,11 @@ def _ingest_rows(rows: Iterable[tuple[int, dict[str, Any]]], source: str, db_pat
     conn.execute("INSERT INTO ingest_runs(source,started_at,finished_at,loaded,new_count,changed_count,skipped_count,embedding_candidates,error_count) VALUES (?,?,?,?,?,?,?,?,?)", (source, started, finished, stats["loaded"], stats["new"], stats["changed"], stats["skipped"], stats["embedding_candidates"], stats["errors"]))
     conn.commit()
     conn.close()
+    stats["embedding_ticket_ids"] = list(dict.fromkeys(stats["embedding_ticket_ids"]))
     OUTPUTS.joinpath("logs").mkdir(parents=True, exist_ok=True)
     log_path = OUTPUTS / "logs" / f"ingest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    log_path.write_text(json.dumps({**stats, "started_at": started, "finished_at": finished, "sample_errors": error_rows}, indent=2), encoding="utf-8")
+    log_stats = {key: value for key, value in stats.items() if key != "embedding_ticket_ids"}
+    log_path.write_text(json.dumps({**log_stats, "started_at": started, "finished_at": finished, "sample_errors": error_rows}, indent=2), encoding="utf-8")
     return stats
 
 
@@ -67,7 +71,7 @@ def ingest_csv(source: str | Path, db_path: str | Path) -> dict[str, Any]:
     source = str(source)
     with open(source, newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        missing = set(TICKET_FIELDS) - set(reader.fieldnames or [])
+        missing = (set(TICKET_FIELDS) - {"updated_date"}) - set(reader.fieldnames or [])
         if missing:
             raise ValueError(f"CSV is missing required columns: {sorted(missing)}")
         return _ingest_rows(enumerate(reader, start=2), source, db_path)

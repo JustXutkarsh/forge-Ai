@@ -8,7 +8,7 @@ from typing import Any
 from forge.agent.tools import search_data, summarize
 from forge.agent.planner import AgentPlan, plan_question
 from forge.analytics.queries import query_structured
-from forge.config import OUTPUTS
+from forge.config import OUTPUTS, require_openai_api_key
 
 
 def _log_agent_run(question: str, output: dict[str, Any], started: float) -> None:
@@ -33,6 +33,7 @@ def _log_agent_run(question: str, output: dict[str, Any], started: float) -> Non
 
 def ask(conn: sqlite3.Connection, query: str) -> dict[str, Any]:
     started = time.perf_counter()
+    require_openai_api_key()
     try:
         from forge.agent.planner import run_openai_agent
         model_output = run_openai_agent(conn, query)
